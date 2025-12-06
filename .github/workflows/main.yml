@@ -2,19 +2,21 @@ name: Lottery Auto Run
 
 on:
   schedule:
-    # 北京时间每周二、四、日 21:30 (UTC时间 13:30)
-    - cron: '30 13 * * 2,4,0'
-  workflow_dispatch: # 允许手动点击按钮运行
+    - cron: '30 13 * * 2,4,0' # 北京时间 21:30 自动运行
+  workflow_dispatch: # 允许手动按钮运行
+
+permissions:
+  contents: write # 必须有这个权限才能创建 gh-pages 分支
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
@@ -26,4 +28,11 @@ jobs:
       - name: Run analysis script
         env:
           PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: python main.py
+
+      # --- 关键：这一步负责把生成的网页上传到 gh-pages ---
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: public
