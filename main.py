@@ -19,124 +19,216 @@ def get_latest_data():
         tables = pd.read_html(response.text)
         df = tables[0]
         
-        # 选取列并重命名
         df = df.iloc[:, [0, 1, 2, 3, 4, 5, 6, 7]]
         df.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
         
-        # 强力清洗：去除无效行，转数字
         df = df[pd.to_numeric(df['Issue'], errors='coerce').notnull()]
         df = df.sort_values(by='Issue', ascending=True)
-        
-        for c in df.columns:
-            df[c] = df[c].astype(int)
+        for c in df.columns: df[c] = df[c].astype(int)
             
-        return df.tail(150).reset_index(drop=True)
+        # 为了保证K线连贯，取最近 300 期计算，最后展示时截取
+        return df.tail(300).reset_index(drop=True)
     except Exception as e:
         print(f"数据抓取错误: {e}")
         return None
 
-# --- 核心算法区 (保持与之前逻辑一致) ---
-def analyze_red_dual(df):
+# --- K线计算核心 (与本地脚本一致) ---
+def calculate_kline(df, target_ball, ball_type, period):
+    # ball_type: 'red' 或 'blue'
+    if ball_type == 'red':
+        cols = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6']
+        prob_hit = 6 / 33
+        prob_miss = 27 / 33
+        is_hit = df[cols].isin([target_ball]).any(axis=1)
+    else:
+        prob_hit = 1 / 16
+        prob_miss = 15 / 16
+        is_hit = (df['Blue'] == target_ball)
+
+    scores = []
+    curr = 0
+    for hit in is_hit:
+        if hit: 
+            curr += prob_miss * (5 if ball_type == 'blue' else 1)
+        else: 
+            curr -= prob_hit
+        scores.append(curr)
+        
+    ohlc = []
+    # 修复 High/Low 逻辑
+    for i in range(0, len(scores), period):
+        chunk = scores[i : i+period]
+        if not chunk: continue
+        prev = scores[i-1] if i > 0 else 0
+        chunk_max = max(chunk)
+        chunk_min = min(chunk)
+        real_high = max(prev, chunk_max)
+        real_low = min(prev, chunk_min)
+        ohlc.append([prev, real_high, real_low, chunk[-1]])
+        
+    k_df = pd.DataFrame(ohlc, columns=['Open', 'High', 'Low', 'Close'])
+    
+    # 计算均线
+    ma_window = 5 if period == 10 else 10
+    k_df['MA'] = k_df['Close'].rolling(ma_window).mean()
+    
+    # 生成期号显示 (简化版)
+    k_df['Index'] = range(len(k_df))
+    
+    return k_df
+
+# --- 策略生成区 ---
+def generate_strategies(df):
+    # 简化的策略生成，主要为了发微信
+    # 这里复用之前的逻辑，计算斜率
+    red_res = []
     cols = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6']
-    res_list = []
+    
+    # 只取最近用于计算斜率
+    df_calc = df.tail(50).reset_index(drop=True)
+    
     for ball in range(1, 34):
-        is_hit = df[cols].isin([ball]).any(axis=1)
+        is_hit = df_calc[cols].isin([ball]).any(axis=1)
         scores = []
         curr = 0
-        for hit in is_hit:
-            curr = (curr + (27/33)) if hit else (curr - (6/33))
-            scores.append(curr)
-        
+        for hit in is_hit: curr = (curr + 27/33) if hit else (curr - 6/33)
+        scores.append(curr)
         s10 = pd.Series(scores)
-        ma5 = s10.rolling(5).mean()
-        slope10 = np.polyfit(np.arange(5), s10.tail(5), 1)[0] * 10
-        above_ma5 = s10.iloc[-1] > ma5.iloc[-1]
-        
-        ma10 = s10.rolling(10).mean()
-        above_ma10 = s10.iloc[-1] > ma10.iloc[-1]
-        
-        tag = "☠️死号"
-        if above_ma5 and above_ma10: tag = "🔥共振"
-        elif above_ma5 and not above_ma10: tag = "💰回踩"
-        elif not above_ma5 and above_ma10: tag = "✨妖股"
-        
-        res_list.append({'b': ball, 'tag': tag, 's10': slope10, 'history': scores})
+        slope = np.polyfit(np.arange(5), s10.tail(5), 1)[0] * 10
+        red_res.append({'b': ball, 's': slope})
+    red_res.sort(key=lambda x: x['s'], reverse=True)
     
-    res_list.sort(key=lambda x: x['s10'], reverse=True)
-    return res_list
-
-def analyze_blue(df):
     blue_res = []
     for ball in range(1, 17):
-        is_hit = (df['Blue'] == ball)
+        is_hit = (df_calc['Blue'] == ball)
         scores = []
         curr = 0
-        for hit in is_hit:
-            curr = (curr + (15/16)*5) if hit else (curr - (1/16))
-            scores.append(curr)
-        slope = np.polyfit(np.arange(5), pd.Series(scores).tail(5), 1)[0] * 10
-        blue_res.append({'b': ball, 'slope': slope, 'history': scores})
-    blue_res.sort(key=lambda x: x['slope'], reverse=True)
-    return blue_res
+        for hit in is_hit: curr = (curr + 15/16*5) if hit else (curr - 1/16)
+        scores.append(curr)
+        s10 = pd.Series(scores)
+        slope = np.polyfit(np.arange(5), s10.tail(5), 1)[0] * 10
+        blue_res.append({'b': ball, 's': slope})
+    blue_res.sort(key=lambda x: x['s'], reverse=True)
+    
+    return red_res, blue_res
 
-# --- 策略生成区 (模拟你的分析逻辑) ---
-def generate_strategies(reds, blues):
-    # 红球分类
-    hot_reds = [r['b'] for r in reds if r['tag'] == "🔥共振"]
-    dip_reds = [r['b'] for r in reds if r['tag'] == "💰回踩"]
-    reversal_reds = [r['b'] for r in reds if r['tag'] == "✨妖股"]
-    
-    # 蓝球分类
-    top_blue = blues[0]['b']
-    second_blue = blues[1]['b']
-    
-    # 方案A：强攻 (斜率最高的红球 + 蓝球王)
-    plan_a_red = hot_reds[:5] + (reversal_reds[:1] if reversal_reds else hot_reds[5:6])
-    plan_a_blue = [top_blue, second_blue]
-    
-    # 方案B：防守 (加入回踩球 + 互补蓝)
-    plan_b_red = hot_reds[:3] + dip_reds[:2] + reversal_reds[:1]
-    # 补齐6个
-    while len(plan_b_red) < 6:
-        for r in hot_reds:
-            if r not in plan_b_red: plan_b_red.append(r); break
-    plan_b_red.sort()
-    plan_b_blue = [blues[2]['b'], blues[3]['b']] # 选斜率第3、4名防守
-    
-    # 方案C：胆拖 (金胆 + 拖码)
-    bankers = hot_reds[:1] + dip_reds[:1] # 1热1回踩做胆
-    if not bankers: bankers = hot_reds[:2]
-    drags = hot_reds[1:4] + reversal_reds[:2]
-    
-    return {
-        "A": {"r": sorted(plan_a_red), "b": sorted(plan_a_blue)},
-        "B": {"r": sorted(plan_b_red), "b": sorted(plan_b_blue)},
-        "C": {"bank": sorted(bankers), "drag": sorted(drags), "b": [top_blue]}
-    }
+# --- 核心：生成交互式网页图表 ---
+def generate_interactive_chart(df, last_issue):
+    # 创建子图：上图10期，下图3期
+    fig = make_subplots(
+        rows=2, cols=1, 
+        shared_xaxes=False,
+        vertical_spacing=0.15,
+        subplot_titles=("【宏观】10期趋势 (MA5)", "【微观】3期买点 (MA10)")
+    )
 
-# --- 可视化图表生成区 ---
-def generate_html_chart(reds, blues, last_issue):
-    # 只画前3名红球和第1名蓝球，避免图表太大
-    top_balls = reds[:3]
-    top_blue = blues[0]
+    # 预先生成所有球的数据，创建 Traces
+    # 顺序：红1..33, 蓝1..16
+    # 每个球有4个Trace: 10期K线, 10期MA, 3期K线, 3期MA
     
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, 
-                        vertical_spacing=0.05,
-                        subplot_titles=[f"红球{b['b']}趋势" for b in top_balls] + [f"蓝球{top_blue['b']}趋势"])
+    buttons = []
+    visible_traces = [True] * 4 + [False] * (49 * 4 - 4) # 默认只显示第一个球(红01)
     
-    # 画红球
-    for i, ball in enumerate(top_balls):
-        y_data = ball['history']
-        x_data = list(range(len(y_data)))
-        fig.add_trace(go.Scatter(x=x_data, y=y_data, mode='lines', name=f'红{ball["b"]}', line=dict(color='#FF4136')), row=i+1, col=1)
+    trace_idx = 0
+    
+    # --- 红球循环 ---
+    for ball in range(1, 34):
+        # 计算数据
+        df_10 = calculate_kline(df, ball, 'red', 10)
+        df_3 = calculate_kline(df, ball, 'red', 3)
+        df_3_recent = df_3.tail(100) # 微观图只看最近100根
         
-    # 画蓝球
-    y_b = top_blue['history']
-    fig.add_trace(go.Scatter(x=list(range(len(y_b))), y=y_b, mode='lines', name=f'蓝{top_blue["b"]}', line=dict(color='#0074D9')), row=4, col=1)
+        # 1. 上图 K线
+        fig.add_trace(go.Candlestick(
+            x=df_10.index, open=df_10['Open'], high=df_10['High'], low=df_10['Low'], close=df_10['Close'],
+            name=f'红{ball:02d}-10期', visible=(ball==1), increasing_line_color='#FF4136', decreasing_line_color='#0074D9'
+        ), row=1, col=1)
+        
+        # 2. 上图 MA
+        fig.add_trace(go.Scatter(
+            x=df_10.index, y=df_10['MA'], mode='lines', name=f'MA5', 
+            visible=(ball==1), line=dict(color='yellow', width=1)
+        ), row=1, col=1)
+        
+        # 3. 下图 K线
+        fig.add_trace(go.Candlestick(
+            x=list(range(len(df_3_recent))), # 重置索引防止错位
+            open=df_3_recent['Open'], high=df_3_recent['High'], low=df_3_recent['Low'], close=df_3_recent['Close'],
+            name=f'红{ball:02d}-3期', visible=(ball==1), increasing_line_color='#F012BE', decreasing_line_color='#2ECC40'
+        ), row=2, col=1)
+        
+        # 4. 下图 MA
+        fig.add_trace(go.Scatter(
+            x=list(range(len(df_3_recent))), y=df_3_recent['MA'], mode='lines', name=f'MA10', 
+            visible=(ball==1), line=dict(color='yellow', width=1)
+        ), row=2, col=1)
+        
+        # 添加按钮配置
+        visibility = [False] * (49 * 4) # 总共有 49个球 * 4个Trace
+        visibility[trace_idx:trace_idx+4] = [True, True, True, True]
+        
+        buttons.append(dict(
+            label=f"🔴 红球 {ball:02d}",
+            method="update",
+            args=[{"visible": visibility},
+                  {"title": f"红球 {ball:02d} 号趋势分析 (第{last_issue}期)"}]
+        ))
+        trace_idx += 4
+
+    # --- 蓝球循环 ---
+    for ball in range(1, 17):
+        df_10 = calculate_kline(df, ball, 'blue', 10)
+        df_3 = calculate_kline(df, ball, 'blue', 3)
+        df_3_recent = df_3.tail(100)
+        
+        # 重复上面的添加Trace逻辑，稍微改颜色区分
+        fig.add_trace(go.Candlestick(
+            x=df_10.index, open=df_10['Open'], high=df_10['High'], low=df_10['Low'], close=df_10['Close'],
+            name=f'蓝{ball:02d}-10期', visible=False, increasing_line_color='#FF4136', decreasing_line_color='#0074D9'
+        ), row=1, col=1)
+        
+        fig.add_trace(go.Scatter(
+            x=df_10.index, y=df_10['MA'], mode='lines', name=f'MA5', visible=False, line=dict(color='cyan', width=1)
+        ), row=1, col=1)
+        
+        fig.add_trace(go.Candlestick(
+            x=list(range(len(df_3_recent))),
+            open=df_3_recent['Open'], high=df_3_recent['High'], low=df_3_recent['Low'], close=df_3_recent['Close'],
+            name=f'蓝{ball:02d}-3期', visible=False, increasing_line_color='#F012BE', decreasing_line_color='#2ECC40'
+        ), row=2, col=1)
+        
+        fig.add_trace(go.Scatter(
+            x=list(range(len(df_3_recent))), y=df_3_recent['MA'], mode='lines', name=f'MA10', visible=False, line=dict(color='cyan', width=1)
+        ), row=2, col=1)
+        
+        visibility = [False] * (49 * 4)
+        visibility[trace_idx:trace_idx+4] = [True, True, True, True]
+        
+        buttons.append(dict(
+            label=f"🔵 蓝球 {ball:02d}",
+            method="update",
+            args=[{"visible": visibility},
+                  {"title": f"蓝球 {ball:02d} 号趋势分析 (第{last_issue}期)"}]
+        ))
+        trace_idx += 4
+
+    # 更新布局，添加下拉菜单
+    fig.update_layout(
+        updatemenus=[dict(
+            active=0,
+            buttons=buttons,
+            direction="down",
+            pad={"r": 10, "t": 10},
+            showactive=True,
+            x=0.5, xanchor="center",
+            y=1.15, yanchor="top"
+        )],
+        template="plotly_dark",
+        height=800,
+        title=f"双色球第 {last_issue} 期 - 交互式 K 线控制台",
+        xaxis_rangeslider_visible=False
+    )
     
-    fig.update_layout(height=800, title=f"双色球第 {last_issue} 期 - 核心号码能量图", template="plotly_dark")
-    
-    # 保存为文件，供GitHub Pages发布
     if not os.path.exists("public"): os.makedirs("public")
     fig.write_html("public/index.html")
 
@@ -152,43 +244,30 @@ def main():
     if df is None or df.empty: return
     
     last_issue = df['Issue'].iloc[-1]
-    reds = analyze_red_dual(df)
-    blues = analyze_blue(df)
-    strats = generate_strategies(reds, blues)
     
-    # 生成图表
-    generate_html_chart(reds, blues, last_issue)
+    # 1. 生成带下拉菜单的网页
+    generate_interactive_chart(df, last_issue)
     
-    # 你的 GitHub Pages 地址 (需要替换用户名)
-    # 格式：https://<你的GitHub用户名>.github.io/<仓库名>/
-    # 脚本会自动尝试获取环境变量，如果获取不到，请手动替换下面的 URL
+    # 2. 生成简单文本分析
+    red_res, blue_res = generate_strategies(df)
+    
+    # 获取 GitHub Pages 链接
     repo_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
-    repo_name = "lottery-auto" # 你的仓库名
-    chart_url = f"https://{repo_owner}.github.io/{repo_name}/" if repo_owner else "请在配置中设置URL"
+    repo_name = "lottery-auto"
+    chart_url = f"https://{repo_owner}.github.io/{repo_name}/" if repo_owner else "#"
 
-    # 构建详细报告
     msg = f"<h3>📅 期号：{last_issue}</h3>"
-    msg += f"<a href='{chart_url}'>👉 <b>点击查看云端K线图 (交互版)</b></a><hr>"
+    msg += f"<h1>👉 <a href='{chart_url}'>点击打开 K 线控制台</a></h1>"
+    msg += "<p>（网页包含所有红球/蓝球的 K 线，点击顶部菜单切换号码）</p><hr>"
     
-    msg += "<h4>📊 市场状态诊断</h4>"
-    hot_count = len([r for r in reds if r['tag']=="🔥共振"])
-    msg += f"🔥 共振热号：{hot_count} 个 (市场{'过热' if hot_count>10 else '正常'})<br>"
-    msg += f"💰 黄金回踩：{[r['b'] for r in reds if r['tag']=='💰回踩'][:3]}<br>"
-    msg += f"✨ 妖股反转：{[r['b'] for r in reds if r['tag']=='✨妖股'][:2]}<br>"
+    msg += "<h4>🔥 极客推荐</h4>"
+    msg += f"<b>红球热号：</b> {red_res[0]['b']:02d}, {red_res[1]['b']:02d}, {red_res[2]['b']:02d}<br>"
+    msg += f"<b>蓝球热号：</b> {blue_res[0]['b']:02d}, {blue_res[1]['b']:02d}<br>"
     
-    msg += "<hr><h4>🛠️ 实战方案推荐</h4>"
+    msg += "<br><i>请点击上方链接，在网页中查看详细的 K 线形态。</i>"
     
-    msg += "<b>【方案A：趋势强攻单】(6+2)</b><br>"
-    msg += f"🔴 红球：{strats['A']['r']}<br>🔵 蓝球：{strats['A']['b']}<br><br>"
-    
-    msg += "<b>【方案B：防守互补单】(6+2)</b><br>"
-    msg += f"🔴 红球：{strats['B']['r']}<br>🔵 蓝球：{strats['B']['b']}<br><br>"
-    
-    msg += "<b>【方案C：极客胆拖】(3胆5拖)</b><br>"
-    msg += f"🔴 胆码：{strats['C']['bank']}<br>⚪ 拖码：{strats['C']['drag']}<br>🔵 蓝球：{strats['C']['b']}<br>"
-    
-    print("分析完成，正在推送...")
-    push_wechat(f"双色球战报-{last_issue}", msg)
+    print("分析完成，网页已生成，正在推送...")
+    push_wechat(f"双色球K线图-{last_issue}", msg)
 
 if __name__ == "__main__":
     main()
