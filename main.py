@@ -22,20 +22,28 @@ BLUE_GROUPS = {
 }
 # ========================================
 
-# --- 1. 数据获取与清洗 ---
+# --- 1. 数据获取 (极速增量版) ---
 def get_web_data():
-    url = "http://datachart.500.com/ssq/history/newinc/history.php?limit=50&sort=0"
+    # 【核心修改点】limit=5：只抓最新的5期数据，速度极快
+    url = "http://datachart.500.com/ssq/history/newinc/history.php?limit=5&sort=0"
     try:
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         response.encoding = 'utf-8'
+        # 解析表格
         df = pd.read_html(response.text)[0].iloc[:, :8]
         df.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
+        # 简单清洗
         df = df[pd.to_numeric(df['Issue'], errors='coerce').notnull()]
         return df.sort_values(by='Issue').astype(int)
-    except: return None
+    except Exception as e:
+        print(f"增量抓取失败: {e}")
+        return None
 
 def update_database():
+    """ 智能合并逻辑：本地全量 + 网络增量 """
     df_local = pd.DataFrame()
+    
+    # 1. 读取本地历史 (全量)
     if os.path.exists(CSV_FILE):
         for enc in ['utf-8', 'gbk', 'gb18030']:
             try:
@@ -43,18 +51,29 @@ def update_database():
                 if not temp.empty: 
                     df_local = temp; break
             except: pass
+            
+    # 2. 获取网络新数据 (仅5条)
     df_net = get_web_data()
+    
+    # 3. 合并与去重
     if df_net is not None:
         if not df_local.empty:
+            # 确保列名一致
             df_local.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
-            df_final = pd.concat([df_local, df_net]).drop_duplicates(subset=['Issue'])
-        else: df_final = df_net
+            # 合并：旧数据 + 新数据，然后根据期号去重
+            df_final = pd.concat([df_local, df_net]).drop_duplicates(subset=['Issue'], keep='last')
+        else: 
+            # 如果本地没了，就只能用这5条(虽然少但也比报错强)
+            df_final = df_net
+            
+        # 排序并保存
         df_final = df_final.sort_values(by='Issue')
         df_final.to_csv(CSV_FILE, index=False, encoding='utf-8')
         return df_final
+        
     return df_local
 
-# --- 2. 核心算法 ---
+# --- 2. 核心算法 (保持不变) ---
 def calc_slope(series, window=5):
     y = series.tail(window)
     if len(y) < 2: return 0
@@ -72,9 +91,9 @@ def get_energy(df, targets, type='red'):
         scores.append(curr)
     return pd.Series(scores)
 
-# --- 3. 生成原始数据表 ---
+# --- 3. 生成原始数据表 (AI专用) ---
 def run_analysis_raw(df):
-    # 1. 红球单兵 (双周期状态)
+    # 1. 红球单兵
     red_single = []
     for b in range(1, 34):
         s = get_energy(df, [b], 'red')
@@ -82,7 +101,6 @@ def run_analysis_raw(df):
         ma5 = s.rolling(5).mean().iloc[-1]; ma10 = s.rolling(10).mean().iloc[-1]
         curr = s.iloc[-1]
         
-        # 这里的状态标记仅供AI参考
         tag = "☠️死"
         if curr > ma5 and curr > ma10: tag = "🔥共振"
         elif curr > ma5 and curr <= ma10: tag = "💰回踩"
@@ -124,7 +142,7 @@ def run_analysis_raw(df):
 
     return df_red_single, df_red_group, df_blue_single, df_blue_group
 
-# --- 4. 生成HTML报表 ---
+# --- 4. 报告生成与推送 ---
 def df_to_html(df, title, limit=None):
     if limit: df = df.head(limit)
     html = f"<div style='margin-bottom:15px'><b>{title}</b>"
@@ -141,34 +159,11 @@ def df_to_html(df, title, limit=None):
     return html
 
 def generate_chart(df, last_issue):
-    # 依然生成网页，方便你核对K线形态
+    # 生成网页占位，防止 Action 报错
     if not os.path.exists("public"): os.makedirs("public")
-    
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=False, vertical_spacing=0.15, subplot_titles=("10期宏观", "3期微观"))
-    buttons = []; idx = 0
-    
-    # 简化的绘图逻辑，只为生成 interactive.html
-    for ball in range(1, 34):
-        s = get_energy(df, [ball], 'red')
-        fig.add_trace(go.Scatter(y=s, mode='lines', name=f'R{ball:02d}', visible=(ball==1), line=dict(color='red')), row=1, col=1)
-        fig.add_trace(go.Scatter(y=s.rolling(5).mean(), name='MA5', visible=(ball==1), line=dict(color='orange')), row=1, col=1)
-        fig.add_trace(go.Scatter(y=s, mode='lines', name=f'R{ball:02d}', visible=(ball==1), line=dict(color='purple')), row=2, col=1)
-        fig.add_trace(go.Scatter(y=s.rolling(10).mean(), name='MA10', visible=(ball==1), line=dict(color='orange')), row=2, col=1)
-        
-        vis = [False] * (49*4); vis[idx:idx+4] = [True]*4
-        buttons.append(dict(label=f"🔴{ball:02d}", method="update", args=[{"visible": vis}, {"title": f"红球{ball:02d}"}]))
-        idx += 4
-        
-    for ball in range(1, 17):
-        s = get_energy(df, [ball], 'blue')
-        # ...省略蓝球部分重复代码，逻辑同上，确保结构完整...
-        # 为保持代码简洁，此处仅示意。实际部署时，如果你想要完整的蓝球图，可以保留之前的绘图逻辑。
-        # 关键是下面的HTML生成
-        pass 
-
-    # 这里为了防报错，直接写个简单版本
+    repo = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
     with open("public/index.html", "w", encoding='utf-8') as f:
-        f.write(f"<html><body><h1>第 {last_issue} 期 K线图已生成</h1><p>请参考微信推送的数据报表。</p></body></html>")
+        f.write(f"<html><body><h1>第 {last_issue} 期数据表已生成</h1><p>请查看微信推送的详细表格。</p></body></html>")
 
 def push_wechat(title, content):
     if not PUSH_TOKEN: return
@@ -181,21 +176,21 @@ def main():
     if df.empty: return
     last_issue = df['Issue'].iloc[-1]
     
-    # 1. 计算原始数据
+    # 运行分析
     rs, rg, bs, bg = run_analysis_raw(df)
     
-    # 2. 生成图表 (占位，防报错)
+    # 生成网页防止报错
     generate_chart(df, last_issue)
     
-    # 3. 构造给AI看的情报
+    # 构造情报
     repo = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
     url = f"https://{repo}.github.io/lottery-auto/" if repo else "#"
     
     msg = f"<h2>📅 第 {last_issue} 期 · 原始数据情报</h2>"
-    msg += f"👉 <a href='{url}'>查看K线图</a><hr>"
+    msg += f"👉 <a href='{url}'>查看K线图</a> (当前模式主要看表格)<hr>"
     msg += "<b>【请复制以下表格发给AI进行分析】</b><br><br>"
     
-    # 红球单兵 (展示前15名，覆盖主要热号和回踩)
+    # 红球单兵 (Top 15)
     msg += df_to_html(rs, "📊 1. 红球单兵 (Top 15)", limit=15)
     # 红球集团 (全览)
     msg += df_to_html(rg, "🛡️ 2. 红球集团 (11组)")
