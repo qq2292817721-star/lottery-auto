@@ -4,6 +4,7 @@ import requests
 import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import json
 
 # ================= 配置区 =================
 PUSH_TOKEN = os.environ.get("PUSH_TOKEN")
@@ -28,7 +29,7 @@ def get_web_data():
     try:
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
         response.encoding = 'utf-8'
-        # 针对新版 pandas 的 FutureWarning 修复，使用 StringIO
+        # 修复 FutureWarning
         from io import StringIO
         df = pd.read_html(StringIO(response.text))[0].iloc[:, :8]
         df.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
@@ -74,7 +75,7 @@ def get_energy(df, targets, type='red'):
         scores.append(curr)
     return pd.Series(scores)
 
-# --- 3. K线数据计算 ---
+# --- 3. K线计算 ---
 def calculate_kline_for_chart(df, target_ball, ball_type, period):
     scores = get_energy(df, [target_ball], ball_type).tolist()
     ohlc = []
@@ -91,42 +92,37 @@ def calculate_kline_for_chart(df, target_ball, ball_type, period):
     k_df['Index'] = range(len(k_df))
     return k_df
 
-# --- 4. 生成交互式网页 ---
-def generate_interactive_chart(df, last_issue, ai_text):
+# --- 4. 生成原生交互网页 (重大升级) ---
+def generate_interactive_page(df, last_issue, ai_text):
     if not os.path.exists("public"): os.makedirs("public")
     
-    # 准备画布
+    # 准备数据
     fig = make_subplots(rows=2, cols=1, shared_xaxes=False, vertical_spacing=0.15,
                         subplot_titles=("【宏观】10期趋势 (MA5)", "【微观】3期买点 (MA10)"))
     
-    buttons = []
-    total_balls = 33 + 16 # 红+蓝
-    traces_per_ball = 4   # 每个球4条线
-    
-    # 限制画图数据量
+    # 限制数据量
     df_chart = df.tail(300).reset_index(drop=True)
     
-    # --- 统一添加所有 Trace ---
-    current_trace_index = 0
+    # 添加所有 Trace，但默认只显示第一个(红01)
+    # 顺序：红01...红33, 蓝01...蓝16
+    # 每个球 4 个 Trace (上K, 上MA, 下K, 下MA)
     
-    # 1. 红球 Traces
+    total_traces = (33 + 16) * 4
+    
+    # 红球
     for ball in range(1, 34):
         df_10 = calculate_kline_for_chart(df_chart, ball, 'red', 10)
         df_3 = calculate_kline_for_chart(df_chart, ball, 'red', 3).tail(100)
+        is_visible = (ball == 1)
         
         fig.add_trace(go.Candlestick(x=df_10.index, open=df_10['Open'], high=df_10['High'], low=df_10['Low'], close=df_10['Close'],
-                                     visible=(ball==1), increasing_line_color='#FF4136', decreasing_line_color='#0074D9', name='10期K'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df_10.index, y=df_10['MA'], mode='lines', visible=(ball==1), line=dict(color='yellow', width=1), name='MA5'), row=1, col=1)
+                                     visible=is_visible, increasing_line_color='#FF4136', decreasing_line_color='#0074D9', name='10期K'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df_10.index, y=df_10['MA'], mode='lines', visible=is_visible, line=dict(color='yellow', width=1), name='MA5'), row=1, col=1)
         fig.add_trace(go.Candlestick(x=list(range(len(df_3))), open=df_3['Open'], high=df_3['High'], low=df_3['Low'], close=df_3['Close'],
-                                     visible=(ball==1), increasing_line_color='#F012BE', decreasing_line_color='#2ECC40', name='3期K'), row=2, col=1)
-        fig.add_trace(go.Scatter(x=list(range(len(df_3))), y=df_3['MA'], mode='lines', visible=(ball==1), line=dict(color='yellow', width=1), name='MA10'), row=2, col=1)
-        
-        vis = [False] * (total_balls * traces_per_ball)
-        vis[current_trace_index : current_trace_index + 4] = [True, True, True, True]
-        buttons.append(dict(label=f"🔴红{ball:02d}", method="update", args=[{"visible": vis}, {"title": f"红球 {ball:02d} 分析"}]))
-        current_trace_index += 4
+                                     visible=is_visible, increasing_line_color='#F012BE', decreasing_line_color='#2ECC40', name='3期K'), row=2, col=1)
+        fig.add_trace(go.Scatter(x=list(range(len(df_3))), y=df_3['MA'], mode='lines', visible=is_visible, line=dict(color='yellow', width=1), name='MA10'), row=2, col=1)
 
-    # 2. 蓝球 Traces
+    # 蓝球
     for ball in range(1, 17):
         df_10 = calculate_kline_for_chart(df_chart, ball, 'blue', 10)
         df_3 = calculate_kline_for_chart(df_chart, ball, 'blue', 3).tail(100)
@@ -137,60 +133,127 @@ def generate_interactive_chart(df, last_issue, ai_text):
         fig.add_trace(go.Candlestick(x=list(range(len(df_3))), open=df_3['Open'], high=df_3['High'], low=df_3['Low'], close=df_3['Close'],
                                      visible=False, increasing_line_color='#F012BE', decreasing_line_color='#2ECC40', name='3期K'), row=2, col=1)
         fig.add_trace(go.Scatter(x=list(range(len(df_3))), y=df_3['MA'], mode='lines', visible=False, line=dict(color='cyan', width=1), name='MA10'), row=2, col=1)
-        
-        vis = [False] * (total_balls * traces_per_ball)
-        vis[current_trace_index : current_trace_index + 4] = [True, True, True, True]
-        buttons.append(dict(label=f"🔵蓝{ball:02d}", method="update", args=[{"visible": vis}, {"title": f"蓝球 {ball:02d} 分析"}]))
-        current_trace_index += 4
 
+    # 基础布局 (去掉 Plotly 自带的按钮，我们自己写 HTML 控件)
     fig.update_layout(
-        updatemenus=[dict(active=0, buttons=buttons, direction="down", pad={"r": 10, "t": 10}, showactive=True, x=0.5, xanchor="center", y=1.15, yanchor="top")],
-        template="plotly_dark", height=800, margin=dict(t=100)
+        template="plotly_dark", 
+        height=700, 
+        margin=dict(t=50, l=10, r=10, b=10),
+        showlegend=False,
+        dragmode='pan' # 手机上默认拖动
     )
     
-    plot_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
+    # 生成图表 Div (不含 HTML 头尾)
+    plot_div = fig.to_html(full_html=False, include_plotlyjs='cdn', div_id='plotly_div')
 
-    # 生成 HTML 页面
+    # === 构建原生 HTML 页面 ===
+    # 这里我们注入自定义 JavaScript 来控制 Plotly 的显示
     custom_html = f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="zh-CN">
     <head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
         <title>双色球第 {last_issue} 期</title>
         <style>
-            body {{ font-family: sans-serif; background: #111; color: #eee; margin: 0; padding: 0; }}
-            .header {{ padding: 15px; text-align: center; background: #222; }}
-            .btn-copy {{
-                background: #00C853; color: white; border: none; padding: 12px 20px;
-                font-size: 16px; border-radius: 6px; cursor: pointer; display: block;
-                width: 80%; margin: 10px auto;
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }}
+            .header {{ padding: 15px; background: #1e1e1e; border-bottom: 1px solid #333; }}
+            .controls {{ display: flex; gap: 10px; margin-top: 10px; }}
+            select {{ 
+                flex: 1; padding: 10px; font-size: 16px; border-radius: 8px; border: 1px solid #444; 
+                background: #333; color: white; -webkit-appearance: none; 
             }}
-            textarea {{ width: 1px; height: 1px; opacity: 0; }}
+            .btn-copy {{
+                background: #00C853; color: white; border: none; padding: 12px; width: 100%;
+                font-size: 16px; border-radius: 8px; font-weight: bold; cursor: pointer;
+            }}
+            .btn-copy:active {{ background: #00E676; }}
+            textarea {{ display: none; }}
         </style>
     </head>
     <body>
         <div class="header">
-            <h3>📊 第 {last_issue} 期 · 极客控制台</h3>
-            <button class="btn-copy" onclick="copyData()">📋 点击复制全量数据 (发给AI)</button>
-            <textarea id="ai-data">{ai_text}</textarea> <!-- 修正点：使用 ai_text 变量 -->
+            <h3 style="margin:0 0 10px 0; text-align:center;">📊 第 {last_issue} 期 · 极客控制台</h3>
+            
+            <button class="btn-copy" onclick="copyData()">📋 复制全量数据 (发给AI)</button>
+            <textarea id="ai-data">{ai_text}</textarea>
+            
+            <div class="controls">
+                <select id="red-select" onchange="switchBall('red')">
+                    <option disabled>-- 切换红球 --</option>
+                    {''.join([f'<option value="{i}">🔴 红球 {i:02d}</option>' for i in range(1, 34)])}
+                </select>
+                <select id="blue-select" onchange="switchBall('blue')">
+                    <option selected disabled>-- 切换蓝球 --</option>
+                    {''.join([f'<option value="{i}">🔵 蓝球 {i:02d}</option>' for i in range(1, 17)])}
+                </select>
+            </div>
         </div>
-        {plot_html}
+
+        <!-- 图表容器 -->
+        {plot_div}
+
         <script>
+            // 复制功能
             function copyData() {{
                 var copyText = document.getElementById("ai-data");
+                copyText.style.display = "block";
                 copyText.select();
                 copyText.setSelectionRange(0, 99999);
-                navigator.clipboard.writeText(copyText.value);
-                alert("✅ 数据已复制！请去对话框粘贴。");
+                try {{
+                    navigator.clipboard.writeText(copyText.value);
+                    alert("✅ 数据已复制！\\n请去对话框粘贴。");
+                }} catch (err) {{
+                    document.execCommand("copy");
+                    alert("✅ 数据已复制！");
+                }}
+                copyText.style.display = "none";
+            }}
+
+            // 切换图表逻辑
+            function switchBall(type) {{
+                var plotlyDiv = document.getElementById('plotly_div');
+                var val;
+                var baseIndex;
+                
+                // 重置另一个下拉框
+                if (type === 'red') {{
+                    document.getElementById('blue-select').selectedIndex = 0;
+                    val = parseInt(document.getElementById('red-select').value);
+                    // 红球索引: (val - 1) * 4
+                    baseIndex = (val - 1) * 4;
+                }} else {{
+                    document.getElementById('red-select').selectedIndex = 0;
+                    val = parseInt(document.getElementById('blue-select').value);
+                    // 蓝球索引: (33 * 4) + (val - 1) * 4
+                    baseIndex = (33 * 4) + (val - 1) * 4;
+                }}
+
+                // 构建 visible 数组
+                // 总共有 (33+16)*4 = 196 个 trace
+                var update = {{'visible': []}};
+                for (var i = 0; i < 196; i++) {{
+                    update.visible.push(false);
+                }}
+                
+                // 开启选中的那4条线
+                update.visible[baseIndex] = true;     // 10期K
+                update.visible[baseIndex + 1] = true; // 10期MA
+                update.visible[baseIndex + 2] = true; // 3期K
+                update.visible[baseIndex + 3] = true; // 3期MA
+
+                // 调用 Plotly 重绘 (瞬间完成)
+                Plotly.restyle(plotlyDiv, update);
             }}
         </script>
     </body>
     </html>
     """
-    with open("public/index.html", "w", encoding='utf-8') as f: f.write(custom_html)
+    
+    with open("public/index.html", "w", encoding='utf-8') as f:
+        f.write(custom_html)
 
-# --- 5. 生成纯文本数据 (用于复制) ---
+# --- 5. 生成纯文本数据 ---
 def generate_raw_text(rs, rg, bs, bg):
     t = "【双色球数据源】\n"
     t += "1. 红球单兵:\n" + rs.to_string() + "\n\n"
@@ -199,7 +262,7 @@ def generate_raw_text(rs, rg, bs, bg):
     t += "4. 蓝球分组:\n" + bg.to_string()
     return t
 
-# --- 6. 生成 HTML 表格 (用于微信推送) ---
+# --- 6. 生成 HTML 表格 ---
 def df_to_html_table(df, title):
     html = f"<div style='margin-bottom:15px'><b>{title}</b>"
     html += "<table border='1' style='border-collapse:collapse;width:100%;font-size:11px;text-align:center;'>"
@@ -276,26 +339,24 @@ def main():
     # 1. 计算所有数据
     rs, rg, bs, bg = run_analysis_raw(df)
     
-    # 2. 生成给AI的纯文本 (用于网页复制按钮)
+    # 2. 生成给AI的纯文本
     ai_text = generate_raw_text(rs, rg, bs, bg)
     
-    # 3. 生成网页 (包含图表 + 复制按钮)
-    generate_interactive_chart(df, last_issue, ai_text)
+    # 3. 生成原生交互网页 (带 select 下拉框)
+    generate_interactive_page(df, last_issue, ai_text)
     
-    # 4. 生成微信HTML内容 (全量展示)
+    # 4. 生成微信内容
     repo = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
     url = f"https://{repo}.github.io/lottery-auto/" if repo else "#"
     
     msg = f"<h2>📅 第 {last_issue} 期 · 全量数据战报</h2>"
-    msg += f"👉 <a href='{url}'><b>点击打开控制台 (含复制按钮)</b></a><hr>"
+    msg += f"👉 <a href='{url}'><b>点击打开控制台 (交互版)</b></a><hr>"
     
-    # 在微信里直接展示全量表格
-    msg += df_to_html_table(rs, "📊 1. 红球单兵 (33码全量)")
-    msg += df_to_html_table(rg, "🛡️ 2. 红球集团 (11组)")
-    msg += df_to_html_table(bs, "🔵 3. 蓝球单兵 (16码全量)")
-    msg += df_to_html_table(bg, "⚖️ 4. 蓝球分组 (8组)")
+    msg += df_to_html_table(rs, "📊 1. 红球单兵")
+    msg += df_to_html_table(rg, "🛡️ 2. 红球集团")
+    msg += df_to_html_table(bs, "🔵 3. 蓝球单兵")
+    msg += df_to_html_table(bg, "⚖️ 4. 蓝球分组")
     
-    # 底部加上文本框方便手机长按复制
     msg += "<hr><b>📋 纯文本数据 (长按复制)：</b><br>"
     msg += f"<textarea rows='10' style='width:100%;font-size:10px;background:#f4f4f4;'>{ai_text}</textarea>"
     
