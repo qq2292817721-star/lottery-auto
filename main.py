@@ -28,7 +28,9 @@ def get_web_data():
     try:
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
         response.encoding = 'utf-8'
-        df = pd.read_html(response.text)[0].iloc[:, :8]
+        # 针对新版 pandas 的 FutureWarning 修复，使用 StringIO
+        from io import StringIO
+        df = pd.read_html(StringIO(response.text))[0].iloc[:, :8]
         df.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
         df = df[pd.to_numeric(df['Issue'], errors='coerce').notnull()]
         return df.sort_values(by='Issue').astype(int)
@@ -89,7 +91,7 @@ def calculate_kline_for_chart(df, target_ball, ball_type, period):
     k_df['Index'] = range(len(k_df))
     return k_df
 
-# --- 4. 生成交互式网页 (修复按钮逻辑) ---
+# --- 4. 生成交互式网页 ---
 def generate_interactive_chart(df, last_issue, ai_text):
     if not os.path.exists("public"): os.makedirs("public")
     
@@ -112,18 +114,13 @@ def generate_interactive_chart(df, last_issue, ai_text):
         df_10 = calculate_kline_for_chart(df_chart, ball, 'red', 10)
         df_3 = calculate_kline_for_chart(df_chart, ball, 'red', 3).tail(100)
         
-        # Trace 1: 10期K线
         fig.add_trace(go.Candlestick(x=df_10.index, open=df_10['Open'], high=df_10['High'], low=df_10['Low'], close=df_10['Close'],
                                      visible=(ball==1), increasing_line_color='#FF4136', decreasing_line_color='#0074D9', name='10期K'), row=1, col=1)
-        # Trace 2: 10期MA
         fig.add_trace(go.Scatter(x=df_10.index, y=df_10['MA'], mode='lines', visible=(ball==1), line=dict(color='yellow', width=1), name='MA5'), row=1, col=1)
-        # Trace 3: 3期K线
         fig.add_trace(go.Candlestick(x=list(range(len(df_3))), open=df_3['Open'], high=df_3['High'], low=df_3['Low'], close=df_3['Close'],
                                      visible=(ball==1), increasing_line_color='#F012BE', decreasing_line_color='#2ECC40', name='3期K'), row=2, col=1)
-        # Trace 4: 3期MA
         fig.add_trace(go.Scatter(x=list(range(len(df_3))), y=df_3['MA'], mode='lines', visible=(ball==1), line=dict(color='yellow', width=1), name='MA10'), row=2, col=1)
         
-        # 按钮逻辑
         vis = [False] * (total_balls * traces_per_ball)
         vis[current_trace_index : current_trace_index + 4] = [True, True, True, True]
         buttons.append(dict(label=f"🔴红{ball:02d}", method="update", args=[{"visible": vis}, {"title": f"红球 {ball:02d} 分析"}]))
@@ -176,7 +173,7 @@ def generate_interactive_chart(df, last_issue, ai_text):
         <div class="header">
             <h3>📊 第 {last_issue} 期 · 极客控制台</h3>
             <button class="btn-copy" onclick="copyData()">📋 点击复制全量数据 (发给AI)</button>
-            <textarea id="ai-data">{ai_report_text}</textarea>
+            <textarea id="ai-data">{ai_text}</textarea> <!-- 修正点：使用 ai_text 变量 -->
         </div>
         {plot_html}
         <script>
@@ -204,7 +201,6 @@ def generate_raw_text(rs, rg, bs, bg):
 
 # --- 6. 生成 HTML 表格 (用于微信推送) ---
 def df_to_html_table(df, title):
-    # 显示所有行，不设 limit
     html = f"<div style='margin-bottom:15px'><b>{title}</b>"
     html += "<table border='1' style='border-collapse:collapse;width:100%;font-size:11px;text-align:center;'>"
     html += "<tr style='background:#eee;'>" + "".join([f"<th>{c}</th>" for c in df.columns]) + "</tr>"
@@ -293,7 +289,7 @@ def main():
     msg = f"<h2>📅 第 {last_issue} 期 · 全量数据战报</h2>"
     msg += f"👉 <a href='{url}'><b>点击打开控制台 (含复制按钮)</b></a><hr>"
     
-    # 在微信里直接展示全量表格 (无 limit 限制)
+    # 在微信里直接展示全量表格
     msg += df_to_html_table(rs, "📊 1. 红球单兵 (33码全量)")
     msg += df_to_html_table(rg, "🛡️ 2. 红球集团 (11组)")
     msg += df_to_html_table(bs, "🔵 3. 蓝球单兵 (16码全量)")
