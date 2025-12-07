@@ -3,22 +3,18 @@ import numpy as np
 import requests
 import os
 import time
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 # ================= 配置区 =================
 PUSH_TOKEN = os.environ.get("PUSH_TOKEN")
 CSV_FILE = "ssq.csv"
 
-# 红球魔力51分组定义
+# 分组定义
 RED_GROUPS = {
     'G01': [1, 19, 31], 'G02': [2, 21, 28], 'G03': [3, 22, 26],
     'G04': [4, 23, 24], 'G05': [5, 16, 30], 'G06': [6, 12, 33],
     'G07': [7, 15, 29], 'G08': [8, 18, 25], 'G09': [9, 10, 32],
     'G10': [11, 13, 27], 'G11': [14, 17, 20]
 }
-
-# 蓝球和值17分组定义
 BLUE_GROUPS = {
     'G1(01+16)': [1, 16], 'G2(02+15)': [2, 15], 'G3(03+14)': [3, 14],
     'G4(04+13)': [4, 13], 'G5(05+12)': [5, 12], 'G6(06+11)': [6, 11],
@@ -26,50 +22,34 @@ BLUE_GROUPS = {
 }
 # ========================================
 
-# --- 1. 数据获取与清洗模块 ---
+# --- 基础工具 ---
 def get_web_data():
     url = "http://datachart.500.com/ssq/history/newinc/history.php?limit=50&sort=0"
-    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
         response.encoding = 'utf-8'
-        tables = pd.read_html(response.text)
-        if not tables: return None
-        df = tables[0].iloc[:, [0, 1, 2, 3, 4, 5, 6, 7]]
+        df = pd.read_html(response.text)[0].iloc[:, :8]
         df.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
-        return df
+        df = df[pd.to_numeric(df['Issue'], errors='coerce').notnull()]
+        return df.sort_values(by='Issue').astype(int)
     except: return None
-
-def clean_data(df):
-    if df is None or df.empty: return pd.DataFrame()
-    df.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
-    for c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce')
-    df = df.dropna().astype(int).sort_values(by='Issue', ascending=True)
-    return df
 
 def update_database():
     df_local = pd.DataFrame()
     if os.path.exists(CSV_FILE):
-        for enc in ['utf-8', 'gbk']:
-            try:
-                temp = pd.read_csv(CSV_FILE, encoding=enc)
-                df_local = clean_data(temp)
-                if not df_local.empty: break
-            except: pass
+        try: df_local = pd.read_csv(CSV_FILE)
+        except: pass
+    df_net = get_web_data()
     
-    df_net = clean_data(get_web_data())
-    
-    if not df_net.empty:
+    if df_net is not None:
         if not df_local.empty:
             df_final = pd.concat([df_local, df_net]).drop_duplicates(subset=['Issue'])
-        else:
-            df_final = df_net
-        df_final = df_final.sort_values(by='Issue', ascending=True)
-        df_final.to_csv(CSV_FILE, index=False, encoding='utf-8')
+        else: df_final = df_net
+        df_final = df_final.sort_values(by='Issue')
+        df_final.to_csv(CSV_FILE, index=False)
         return df_final
     return df_local
 
-# --- 2. 核心算法工具 ---
 def calc_slope(series, window=5):
     y = series.tail(window)
     if len(y) < 2: return 0
@@ -77,160 +57,146 @@ def calc_slope(series, window=5):
 
 def get_energy(df, targets, type='red'):
     if type == 'red':
-        prob_hit, prob_miss = 6/33, 27/33
-        cols = ['R1','R2','R3','R4','R5','R6']
+        prob_miss = 27/33; cols = ['R1','R2','R3','R4','R5','R6']
         is_hit = df[cols].isin(targets).any(axis=1)
     else:
-        prob_hit, prob_miss = 1/16, 15/16
-        is_hit = df['Blue'].isin(targets)
+        prob_miss = 15/16; is_hit = df['Blue'].isin(targets)
     
-    scores = []
-    curr = 0
+    scores = []; curr = 0
     for hit in is_hit:
-        curr = (curr + prob_miss) if hit else (curr - prob_hit)
+        curr = (curr + prob_miss * (5 if type=='blue' else 1)) if hit else (curr - (1 - prob_miss))
         scores.append(curr)
     return pd.Series(scores)
 
-# --- 3. 深度分析模块 ---
-def analyze_market(df):
-    # === 红球单兵扫描 ===
-    red_stats = []
-    for ball in range(1, 34):
-        s = get_energy(df, [ball], 'red')
-        ma5 = s.rolling(5).mean().iloc[-1]
-        ma10 = s.rolling(10).mean().iloc[-1]
+# --- 核心分析逻辑 (生成数据表) ---
+def run_analysis(df):
+    # 1. 红球单兵
+    red_single = []
+    for b in range(1, 34):
+        s = get_energy(df, [b], 'red')
+        s10 = calc_slope(s, 5); s3 = calc_slope(s, 3)
+        ma5 = s.rolling(5).mean().iloc[-1]; ma10 = s.rolling(10).mean().iloc[-1]
         curr = s.iloc[-1]
-        slope10 = calc_slope(s, 5) # 宏观斜率
-        
-        # 3期微观
-        s3_slope = calc_slope(s, 3)
-        
-        # 判定
-        is_bull_10 = curr > ma5
-        is_bull_3 = curr > ma10
         
         tag = "☠️死"
-        prio = 0
-        if is_bull_10 and is_bull_3: 
-            tag = "🔥共振"; prio = 5
-        elif is_bull_10 and not is_bull_3: 
-            tag = "💰回踩"; prio = 4
-        elif not is_bull_10 and is_bull_3: 
-            tag = "✨妖股"; prio = 3
-            
-        red_stats.append({
-            'b': ball, 's10': slope10, 's3': s3_slope, 
-            'tag': tag, 'prio': prio
-        })
-    red_stats.sort(key=lambda x: (x['prio'], x['s10']), reverse=True)
+        if curr > ma5 and curr > ma10: tag = "🔥共振"
+        elif curr > ma5 and curr <= ma10: tag = "💰回踩"
+        elif curr <= ma5 and curr > ma10: tag = "✨妖股"
+        
+        red_single.append({'号码': f"{b:02d}", '10期斜率': round(s10, 1), '3期斜率': round(s3, 1), '诊断': tag})
+    df_red_single = pd.DataFrame(red_single).sort_values(by='10期斜率', ascending=False)
 
-    # === 红球集团扫描 ===
-    red_groups = []
+    # 2. 红球集团
+    red_group = []
     for name, balls in RED_GROUPS.items():
         s = get_energy(df, balls, 'red')
         slope = calc_slope(s, 10)
-        red_groups.append({'n': name, 'b': balls, 's': slope})
-    red_groups.sort(key=lambda x: x['s'], reverse=True)
+        tag = "🔥冲锋" if slope > 2 else ("🚀启动" if slope > 0 else "☠️弱势")
+        red_group.append({'代号': name, '号码': str(balls), '斜率': round(slope, 1), '诊断': tag})
+    df_red_group = pd.DataFrame(red_group).sort_values(by='斜率', ascending=False)
 
-    # === 蓝球扫描 ===
-    blue_stats = []
-    for ball in range(1, 17):
-        s = get_energy(df, [ball], 'blue')
-        slope = calc_slope(s, 5)
-        # 加强版斜率：如果是蓝球，波动大，放大系数
-        blue_stats.append({'b': ball, 's': slope * 2})
-    blue_stats.sort(key=lambda x: x['s'], reverse=True)
+    # 3. 蓝球单兵
+    blue_single = []
+    for b in range(1, 17):
+        s = get_energy(df, [b], 'blue')
+        s10 = calc_slope(s, 5); s3 = calc_slope(s, 3)
+        ma5 = s.rolling(5).mean().iloc[-1]; ma10 = s.rolling(10).mean().iloc[-1]
+        curr = s.iloc[-1]
+        
+        tag = "☠️深渊"
+        if curr > ma5 and curr > ma10: tag = "🔥皇冠"
+        elif curr > ma5 and curr <= ma10: tag = "💰回踩"
+        elif curr <= ma5 and curr > ma10: tag = "🚀启动"
+        
+        blue_single.append({'号码': f"{b:02d}", '10期': round(s10, 1), '3期': round(s3, 1), '诊断': tag})
+    df_blue_single = pd.DataFrame(blue_single).sort_values(by='10期', ascending=False)
 
-    # === 蓝球分组 ===
-    blue_groups = []
+    # 4. 蓝球分组
+    blue_group = []
     for name, balls in BLUE_GROUPS.items():
         s = get_energy(df, balls, 'blue')
         slope = calc_slope(s, 5)
-        blue_groups.append({'n': name, 'b': balls, 's': slope})
-    blue_groups.sort(key=lambda x: x['s'], reverse=True)
+        tag = "🔥拉升" if slope > 1 else ("🚀启动" if slope > 0 else "☠️下跌")
+        blue_group.append({'组合': name, '斜率': round(slope, 1), '诊断': tag})
+    df_blue_group = pd.DataFrame(blue_group).sort_values(by='斜率', ascending=False)
 
-    return red_stats, red_groups, blue_stats, blue_groups
+    return df_red_single, df_red_group, df_blue_single, df_blue_group
 
-# --- 4. 策略生成与报告 ---
-def generate_report(last_issue, r_stats, r_groups, b_stats, b_groups, chart_url):
-    # 提取核心数据
-    hot_reds = [r['b'] for r in r_stats if r['tag']=="🔥共振"][:6]
-    dip_reds = [r['b'] for r in r_stats if r['tag']=="💰回踩"][:2]
-    rev_reds = [r['b'] for r in r_stats if r['tag']=="✨妖股"][:2]
-    
-    top_r_group = r_groups[0]
-    top_b_single = b_stats[0]
-    top_b_group = b_groups[0]
-    
-    # 方案生成
-    # A: 趋势强攻 (单兵最强)
-    plan_a_r = sorted(hot_reds[:6])
-    if len(plan_a_r) < 6: # 补位
-        remain = [r['b'] for r in r_stats if r['b'] not in plan_a_r][:6-len(plan_a_r)]
-        plan_a_r.extend(remain)
-    plan_a_b = [b_stats[0]['b'], b_stats[1]['b']]
-    
-    # B: 集团掩护 (最强红球组 + 最强蓝球组)
-    # 取最强组3个 + 3个单兵强号
-    plan_b_r = list(set(top_r_group['b']) | set(hot_reds[:3]))
-    while len(plan_b_r) < 6: plan_b_r.append(hot_reds[len(plan_b_r)])
-    plan_b_r = sorted(plan_b_r[:6])
-    plan_b_b = sorted(top_b_group['b'])
-    
-    # C: 胆拖 (金胆 + 拖)
-    banker = hot_reds[:2] + dip_reds[:1]
-    drags = hot_reds[2:5] + rev_reds
-    plan_c_b = [b_stats[0]['b']]
-
-    # === HTML 报告构建 ===
-    html = f"<h2>📅 双色球第 {last_issue} 期 · 深度波浪战报</h2>"
-    html += f"👉 <a href='{chart_url}'><b>点击打开云端 K 线控制台</b></a><hr>"
-    
-    html += "<h3>🔴 红球情报局</h3>"
-    html += f"<b>🔥 共振加速 (金胆池):</b> {hot_reds}<br>"
-    html += f"<b>💰 黄金回踩 (博冷):</b> {dip_reds}<br>"
-    html += f"<b>✨ 妖股反转 (防守):</b> {rev_reds}<br>"
-    html += f"<b>🏆 最强军团:</b> {top_r_group['n']} {top_r_group['b']} (斜率:{top_r_group['s']:.1f})<br>"
-    
-    html += "<h3>🔵 蓝球雷达</h3>"
-    html += f"<b>🚀 单兵王:</b> {top_b_single['b']:02d} (强度 {top_b_single['s']:.1f})<br>"
-    html += f"<b>🛡️ 冠军组:</b> {top_b_group['n']} (强度 {top_b_group['s']:.1f})<br>"
-    
-    html += "<hr><h3>🎫 极客最终实战方案</h3>"
-    
-    html += "<div style='background:#fff0f0; padding:10px; border-radius:5px;'>"
-    html += "<b>【方案A：趋势强攻单】(6+2)</b><br>"
-    html += "<i>逻辑：死磕单兵斜率最高的号码</i><br>"
-    html += f"🔴 <font color='red'>{plan_a_r}</font><br>"
-    html += f"🔵 <font color='blue'>{plan_a_b}</font>"
-    html += "</div><br>"
-    
-    html += "<div style='background:#f0f8ff; padding:10px; border-radius:5px;'>"
-    html += "<b>【方案B：集团掩护单】(6+2)</b><br>"
-    html += "<i>逻辑：以最强分组为核心，防断层</i><br>"
-    html += f"🔴 <font color='red'>{plan_b_r}</font><br>"
-    html += f"🔵 <font color='blue'>{plan_b_b}</font>"
-    html += "</div><br>"
-    
-    html += "<div style='background:#f0fff0; padding:10px; border-radius:5px;'>"
-    html += "<b>【方案C：极客胆拖】(3胆5拖)</b><br>"
-    html += "<i>逻辑：高杠杆博大奖</i><br>"
-    html += f"🔴 胆: <b>{banker}</b><br>"
-    html += f"⚪ 拖: {drags}<br>"
-    html += f"🔵 蓝: <b>{plan_c_b}</b>"
-    html += "</div>"
-    
+# --- 生成 HTML 报告 ---
+def df_to_html(df, title, limit=None):
+    if limit: df = df.head(limit)
+    html = f"<h4>{title}</h4>"
+    html += "<table border='1' style='border-collapse: collapse; width: 100%; font-size: 12px; text-align: center;'>"
+    html += "<tr style='background-color: #f2f2f2;'>" + "".join([f"<th>{c}</th>" for c in df.columns]) + "</tr>"
+    for _, row in df.iterrows():
+        color = "black"
+        if "🔥" in str(row.values): color = "red"
+        elif "💰" in str(row.values): color = "orange"
+        elif "☠️" in str(row.values): color = "gray"
+        
+        html += f"<tr style='color: {color};'>" + "".join([f"<td>{v}</td>" for v in row.values]) + "</tr>"
+    html += "</table>"
     return html
 
-# --- K线图生成 (精简版) ---
-def generate_chart(df, last_issue):
-    # 仅为了生成网页，逻辑简化，重点是上面的文字报告
-    if not os.path.exists("public"): os.makedirs("public")
-    with open("public/index.html", "w") as f:
-        f.write(f"<h1>Chart Generated for {last_issue}</h1>") # 占位，实际上你可以复用之前的画图代码
-    # 这里为了代码长度，暂不重复粘贴那个巨大的画图函数，
-    # 建议：如果你非常需要图表，把上一个版本的 generate_interactive_chart 函数贴回来即可。
-    # 本次更新重点是 Text Report 的丰富度。
+def logic_deduction(r_s, r_g, b_s, b_g):
+    # 逻辑推演文本生成
+    log = "<h3>🧠 极客逻辑推演 (Step-by-Step)</h3>"
+    
+    # 红球推演
+    log += "<b>1. 红球交叉验证：</b><br>"
+    top_r_single = r_s.iloc[0]['号码']
+    top_r_group_name = r_g.iloc[0]['代号']
+    top_r_group_balls = r_g.iloc[0]['号码']
+    
+    log += f"• <b>单兵雷达：</b>显示 {top_r_single} 号斜率最高，动能最强。<br>"
+    log += f"• <b>集团军：</b>显示 {top_r_group_name} {top_r_group_balls} 是第一梯队。<br>"
+    
+    # 找交集
+    hot_list = r_s[r_s['诊断'].str.contains("🔥")]['号码'].tolist()[:6]
+    group_hot = eval(top_r_group_balls)
+    intersection = [f"{x:02d}" for x in group_hot if f"{x:02d}" in hot_list]
+    
+    if intersection:
+        log += f"• <b>👉 结论：</b>单兵与集团在 <b>{intersection}</b> 发生共振，确认为铁胆！<br>"
+    else:
+        log += f"• <b>👉 结论：</b>单兵与集团分化，优先跟随单兵王 <b>{top_r_single}</b>。<br>"
+
+    # 蓝球推演
+    log += "<br><b>2. 蓝球趋势研判：</b><br>"
+    top_b = b_s.iloc[0]['号码']
+    top_bg = b_g.iloc[0]['组合']
+    
+    log += f"• <b>斜率王：</b>{top_b} 号（数据第一）。<br>"
+    log += f"• <b>冠军组：</b>{top_bg}。<br>"
+    log += "• <b>👉 策略：</b>直接锁定单兵王与冠军组的交集。<br>"
+    
+    return log, hot_list, top_b, intersection
+
+def generate_final_strategy(hot_reds, top_blue, intersection):
+    # 构建 ABC 方案
+    # A: 强攻 (单兵前6)
+    plan_a = hot_reds[:6]
+    
+    # B: 互补 (交集 + 黄金回踩)
+    # 这里简化：取交集 + 单兵前列补齐
+    plan_b = intersection + [x for x in hot_reds if x not in intersection]
+    plan_b = sorted(list(set(plan_b[:7]))) # 7个号
+    
+    # C: 胆拖
+    bankers = intersection if intersection else hot_reds[:2]
+    drags = [x for x in hot_reds if x not in bankers][:5]
+    
+    html = "<h3>🎫 最终出票指令</h3>"
+    html += "<div style='background:#fff0f0; padding:8px; border-radius:4px; margin-bottom:5px;'>"
+    html += f"<b>【方案A：趋势强攻】(6+1)</b><br>🔴 {','.join(plan_a)} + 🔵 {top_blue}</div>"
+    
+    html += "<div style='background:#f0f8ff; padding:8px; border-radius:4px; margin-bottom:5px;'>"
+    html += f"<b>【方案B：集团防守】(7+1)</b><br>🔴 {','.join(plan_b)} + 🔵 {top_blue}</div>"
+    
+    html += "<div style='background:#f0fff0; padding:8px; border-radius:4px;'>"
+    html += f"<b>【方案C：胆拖狙击】</b><br>🔴 胆:{','.join(bankers)} 拖:{','.join(drags)} + 🔵 {top_blue}</div>"
+    
+    return html
 
 def push_wechat(title, content):
     if not PUSH_TOKEN: return
@@ -239,28 +205,33 @@ def push_wechat(title, content):
     })
 
 def main():
+    print("🚀 启动深度分析引擎...")
     df = update_database()
     if df.empty: return
     last_issue = df['Issue'].iloc[-1]
     
-    # 分析
-    r_stats, r_groups, b_stats, b_groups = analyze_market(df)
+    # 1. 运行四大脚本逻辑
+    df_rs, df_rg, df_bs, df_bg = run_analysis(df)
     
-    # 链接
-    repo_owner = os.environ.get("GITHUB_REPOSITORY_OWNER")
-    repo_name = "lottery-auto"
-    chart_url = f"https://{repo_owner}.github.io/{repo_name}/" if repo_owner else "#"
+    # 2. 生成详细 HTML 报告
+    msg = f"<h2>📅 第 {last_issue} 期 · 全维度深度复盘</h2><hr>"
     
-    # 生成并推送
-    html_msg = generate_report(last_issue, r_stats, r_groups, b_stats, b_groups, chart_url)
+    # 插入四个数据表 (限制行数，防止消息过长)
+    msg += df_to_html(df_rs, "📊 1. 红球单兵雷达 (Top 10)", limit=10)
+    msg += df_to_html(df_rg, "🛡️ 2. 红球集团军 (全览)")
+    msg += df_to_html(df_bs, "🔵 3. 蓝球单兵动能 (Top 8)", limit=8)
+    msg += df_to_html(df_bg, "⚖️ 4. 蓝球分组战法 (全览)")
     
-    # 生成网页占位 (为了Action不报错)
-    if not os.path.exists("public"): os.makedirs("public")
-    with open("public/index.html", "w", encoding='utf-8') as f:
-        f.write(f"<html><body><h1>第 {last_issue} 期分析图表</h1><p>请参考微信推送的详细报告。</p></body></html>")
-
-    push_wechat(f"双色球深度战报-{last_issue}", html_msg)
-    print("推送完成")
+    # 3. 插入逻辑推演
+    logic_text, hot_reds, top_blue, intersect = logic_deduction(df_rs, df_rg, df_bs, df_bg)
+    msg += "<hr>" + logic_text
+    
+    # 4. 插入最终方案
+    msg += "<hr>" + generate_final_strategy(hot_reds, top_blue, intersect)
+    
+    # 5. 推送
+    print("分析完成，推送中...")
+    push_wechat(f"双色球深度分析-{last_issue}", msg)
 
 if __name__ == "__main__":
     main()
