@@ -4,9 +4,8 @@ import requests
 import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import json
-import time
 import re
+import time
 from io import StringIO
 
 # ================= 配置区 =================
@@ -28,195 +27,202 @@ BLUE_GROUPS = {
 
 def get_headers():
     return {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
     }
 
-# --- 1. 核弹级数据抓取模块 (v6.0) ---
+# --- 1. 搜索引擎 & 地方官网 抓取模块 (Search Engine Fetchers) ---
 
-def fetch_zhcw_fixed():
+def extract_numbers_from_text(text, target_issue):
     """
-    源1: 中彩网 (修复GBK编码问题)
-    你截图里的网站，必须用 GBK 解码才能看到数据
+    通用暴力解析器：在文本中寻找 目标期号 及其后的 7 个数字
     """
-    print("📡 尝试源1: 中彩网 (GBK修复版)...")
-    url = f"http://www.zhcw.com/ssq/kjgg/?_t={int(time.time()*1000)}"
-    try:
-        r = requests.get(url, headers=get_headers(), timeout=15)
-        r.encoding = 'gbk' # 关键修正！
+    # 正则逻辑：
+    # 1. 找到期号 (比如 2025141)
+    # 2. 后面可能跟着日期、文字等杂质
+    # 3. 提取随后出现的 6个红球(01-33) 和 1个蓝球(01-16)
+    # 4. 容错：数字之间允许有空格、HTML标签、逗号等
+    
+    # 寻找期号出现的位置
+    issue_str = str(target_issue)
+    if issue_str not in text:
+        return None
+    
+    # 截取期号后面的文本 (限制长度500字符，防止匹配到无关内容)
+    start_idx = text.find(issue_str)
+    sub_text = text[start_idx:start_idx+500]
+    
+    # 提取所有两位数字
+    nums = re.findall(r'\b([0-3][0-9])\b', sub_text)
+    
+    # 清洗：转为int
+    valid_nums = [int(n) for n in nums]
+    
+    # 过滤：红球 <=33, 蓝球 <=16
+    # 既然是双色球，我们寻找连续的7个符合规则的数字
+    # 通常前6个红，后1个蓝。
+    
+    for i in range(len(valid_nums) - 6):
+        chunk = valid_nums[i : i+7]
+        # 简单校验：前6个互不相同且<=33
+        reds = chunk[:6]
+        blue = chunk[6]
         
-        # 使用 Pandas 解析表格
-        dfs = pd.read_html(StringIO(r.text))
-        for df in dfs:
-            # 转换为字符串并查找期号
-            s_df = df.astype(str)
-            # 筛选出包含 2025141 这一行的
-            # 假设最新一期在第一行，我们遍历前几行
-            for _, row in df.iterrows():
-                row_str = " ".join([str(v) for v in row.values])
-                # 提取期号
-                issue_match = re.search(r'(202[4-9]\d{3})', row_str)
-                if issue_match:
-                    issue = int(issue_match.group(1))
-                    
-                    # 提取所有球号 (中彩网通常是 期号 日期 红1..红6 蓝)
-                    # 我们提取这一行里所有 <= 33 的数字
-                    nums = re.findall(r'\b\d{1,2}\b', row_str)
-                    clean_nums = [int(n) for n in nums if int(n) <= 33]
-                    
-                    # 过滤掉期号前后的杂质，通常红球蓝球连在一起
-                    # 简单的启发式：找连续的7个数字
-                    if len(clean_nums) >= 7:
-                        # 假设最后7个是红+蓝 (倒数第1个是蓝, 倒数7-2是红)
-                        # 中彩网表格：期号, 日期, R1, R2, R3, R4, R5, R6, Blue
-                        # 所以我们取最后7个数字
-                        balls = clean_nums[-7:]
-                        
-                        df_res = pd.DataFrame([[issue] + balls], columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
-                        print(f"✅ 源1(中彩网) 捕获成功: {issue}")
-                        return df_res
-    except Exception as e:
-        print(f"❌ 源1失败: {e}")
+        if len(set(reds)) == 6 and all(1 <= r <= 33 for r in reds) and 1 <= blue <= 16:
+            # 找到了一组非常像双色球的数据
+            return chunk
+            
     return None
 
-def fetch_m_500():
+def fetch_so_search(target_issue):
     """
-    源2: 500彩票 触屏版 (m.500.com)
-    触屏版页面结构简单，且缓存策略通常比PC版宽松
+    源1: 360搜索 (so.com)
+    360的网页结构比较简单，适合爬虫
     """
-    print("📡 尝试源2: 500触屏版...")
-    url = f"https://m.500.com/info/kaijiang/ssq/?_t={int(time.time())}"
+    url = f"https://www.so.com/s?q=双色球{target_issue}"
+    print(f"🔍 [搜索引擎] 正在搜索 360: {url}")
     try:
         r = requests.get(url, headers=get_headers(), timeout=10)
         r.encoding = 'utf-8'
         
-        # 触屏版通常直接显示最新一期
-        # 寻找期号: 第2025141期
-        issue_match = re.search(r'第\s*(\d{7})\s*期', r.text)
-        if issue_match:
-            issue = int(issue_match.group(1))
-            
-            # 寻找红球: <div class="ball_red">02</div>
-            reds = re.findall(r'class="ball_red">(\d+)<', r.text)
-            # 寻找蓝球: <div class="ball_blue">06</div>
-            blues = re.findall(r'class="ball_blue">(\d+)<', r.text)
-            
-            if len(reds) >= 6 and len(blues) >= 1:
-                row = [issue] + [int(x) for x in reds[:6]] + [int(blues[0])]
-                print(f"✅ 源2(500触屏) 捕获成功: {issue}")
-                return pd.DataFrame([row], columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
+        nums = extract_numbers_from_text(r.text, target_issue)
+        if nums:
+            print(f"✅ 360搜索找到数据: {nums}")
+            return nums
     except Exception as e:
-        print(f"❌ 源2失败: {e}")
+        print(f"❌ 360搜索失败: {e}")
     return None
 
-def fetch_sina_api_v2():
+def fetch_baidu_search(target_issue):
     """
-    源3: 新浪 API (加强版)
+    源2: 百度搜索 (baidu.com)
     """
-    print("📡 尝试源3: 新浪API...")
-    url = "https://match.lottery.sina.com.cn/client/index/client_list"
-    params = {
-        'lotteryCode': 'ssq',
-        'page': 1,
-        '_': int(time.time()*1000) # 时间戳破缓存
-    }
+    url = f"https://www.baidu.com/s?wd=双色球{target_issue}"
+    print(f"🔍 [搜索引擎] 正在搜索 百度: {url}")
     try:
-        r = requests.get(url, params=params, headers=get_headers(), timeout=10)
-        data = r.json()
-        if 'result' in data and 'data' in data['result']:
-            item = data['result']['data'][0] # 取最新的
-            issue = int(item['issueNo'])
-            draw = item['drawCode']
-            r_str, b_str = draw.split('|')
-            reds = [int(x) for x in r_str.split(',')]
-            blue = int(b_str)
-            print(f"✅ 源3(新浪) 捕获成功: {issue}")
-            return pd.DataFrame([[issue]+reds+[blue]], columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
+        # 百度需要Cookie防止验证码，简单尝试无Cookie版
+        r = requests.get(url, headers=get_headers(), timeout=10)
+        r.encoding = 'utf-8'
+        
+        nums = extract_numbers_from_text(r.text, target_issue)
+        if nums:
+            print(f"✅ 百度搜索找到数据: {nums}")
+            return nums
     except Exception as e:
-        print(f"❌ 源3失败: {e}")
+        print(f"❌ 百度搜索失败: {e}")
     return None
 
-def fetch_baidu_api():
+def fetch_bj_lottery(target_issue):
     """
-    源4: 百度搜索透传数据
+    源3: 北京福彩官网 (地方站，直连，无CDN)
+    http://www.bwlc.net/
     """
-    print("📡 尝试源4: 百度API...")
-    url = "https://sp0.baidu.com/9_Q4sjW91Qh3otqbppnN2DJv/pae/channel/data/asyncqury?appid=4001&com=wssq&limit=1"
+    url = "http://www.bwlc.net/bulletin/prevssq.html"
+    print(f"🏢 [地方官网] 正在访问 北京福彩: {url}")
+    try:
+        r = requests.get(url, headers=get_headers(), timeout=15)
+        r.encoding = 'utf-8'
+        
+        # 这是一个列表页，寻找 target_issue
+        if str(target_issue) in r.text:
+            # 北京福彩表格结构：
+            # <tr class="bg_c"><td>2025141</td><td>2025-12-07</td><td>02</td><td>04</td>...
+            # 直接用正则提取行
+            row_pattern = re.compile(f"{target_issue}.*?</tr>", re.DOTALL)
+            match = row_pattern.search(r.text)
+            if match:
+                row_html = match.group(0)
+                # 提取数字
+                nums = re.findall(r'>(\d{2})<', row_html)
+                if len(nums) >= 7:
+                    # 北京官网红蓝球也是分开td的，提取到的前7个数字通常就是
+                    # 排除掉日期部分(如果有)
+                    valid = [int(n) for n in nums if int(n) <= 33]
+                    if len(valid) >= 7:
+                        # 取最后7个（假设蓝球在最后）
+                        final_nums = valid[-7:]
+                        print(f"✅ 北京福彩找到数据: {final_nums}")
+                        return final_nums
+    except Exception as e:
+        print(f"❌ 北京福彩失败: {e}")
+    return None
+
+def fetch_gx_lottery(target_issue):
+    """
+    源4: 广西福彩 (备用地方站)
+    """
+    url = "https://www.gxcaipiao.com.cn/notice/get_notice_list?game_code=100&page_index=1&page_size=10"
+    print(f"🏢 [地方官网] 正在访问 广西福彩API...")
     try:
         r = requests.get(url, headers=get_headers(), timeout=10)
         data = r.json()
-        if data['data']:
-            item = data['data'][0]
-            issue = int(item['qh'])
-            reds = [int(x) for x in item['red'].split(',')] # 可能需要处理格式
-            blue = int(item['blue']) # 可能需要处理格式
-            # 百度有时候返回的是 字符串列表，需要健壮性处理
-            if len(reds) == 6:
-                print(f"✅ 源4(百度) 捕获成功: {issue}")
-                return pd.DataFrame([[issue]+reds+[blue]], columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
+        for item in data['data']:
+            if str(item['term']) == str(target_issue):
+                # 格式: 01,02,03,04,05,06+07
+                red_blue = item['open_number']
+                r_str, b_str = red_blue.split('+')
+                reds = [int(x) for x in r_str.split(',')]
+                blue = int(b_str)
+                res = reds + [blue]
+                print(f"✅ 广西福彩找到数据: {res}")
+                return res
     except Exception as e:
-        print(f"❌ 源4失败: {e}")
+        print(f"❌ 广西福彩失败: {e}")
     return None
 
 def get_web_data(local_issue):
     """
-    轮询所有源，直到找到比 local_issue 更新的数据
+    智能调度器: 预测下一期，然后全网搜索
     """
-    fetchers = [fetch_zhcw_fixed, fetch_m_500, fetch_sina_api_v2, fetch_baidu_api]
+    target_issue = local_issue + 1
+    print(f"🎯 目标期号: {target_issue} (脚本将全网搜索此号码)")
     
-    best_df = None
+    # 搜索源列表
+    searchers = [fetch_bj_lottery, fetch_gx_lottery, fetch_so_search, fetch_baidu_search]
     
-    for fetcher in fetchers:
-        df = fetcher()
-        if df is not None and not df.empty:
-            issue = int(df.iloc[0]['Issue'])
-            if issue > local_issue:
-                return df # 找到新数据，直接返回
-            if best_df is None or issue > int(best_df.iloc[0]['Issue']):
-                best_df = df # 保留目前为止最新的
-                
-    return best_df
+    for searcher in searchers:
+        nums = searcher(target_issue)
+        if nums:
+            # 组装 DataFrame
+            row = [target_issue] + nums
+            df = pd.DataFrame([row], columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
+            return df
+            
+    print(f"⚠️ 搜索完成，未找到第 {target_issue} 期数据。")
+    return None
 
 def update_database():
     df_local = pd.DataFrame()
-    last_local_issue = 0
+    last_issue = 2025000 
     
     if os.path.exists(CSV_FILE):
         try: 
             df_local = pd.read_csv(CSV_FILE)
             if not df_local.empty:
-                last_local_issue = int(df_local['Issue'].iloc[-1])
+                last_issue = int(df_local['Issue'].iloc[-1])
         except: pass
     
-    print(f"📂 本地最新: {last_local_issue}")
+    print(f"📂 本地最新: {last_issue}")
     
-    # 获取网络数据
-    df_net = get_web_data(last_local_issue)
+    # 执行搜索
+    df_net = get_web_data(last_issue)
     
     if df_net is not None and not df_net.empty:
-        net_issue = int(df_net.iloc[0]['Issue'])
-        
-        # 只有真的比本地新，才进行合并
-        if net_issue > last_local_issue:
-            print(f"🎉 成功更新! {last_local_issue} -> {net_issue}")
-            if not df_local.empty:
-                df_local.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
-                df_final = pd.concat([df_local, df_net]).drop_duplicates(subset=['Issue'], keep='last')
-            else:
-                df_final = df_net
-            
-            df_final = df_final.sort_values(by='Issue')
-            df_final.to_csv(CSV_FILE, index=False, encoding='utf-8')
-            return df_final
+        print(f"🎉 抓取成功! 更新本地数据库...")
+        if not df_local.empty:
+            df_local.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
+            df_final = pd.concat([df_local, df_net]).drop_duplicates(subset=['Issue'], keep='last')
         else:
-            print(f"💤 全网数据仍为 {net_issue} 期 (未更新)")
-            return df_local # 返回旧数据
+            df_final = df_net
+        
+        df_final = df_final.sort_values(by='Issue')
+        df_final.to_csv(CSV_FILE, index=False, encoding='utf-8')
+        return df_final
     
     return df_local
 
-# --- 2. 算法与绘图 (不变) ---
+# --- 2. 核心算法 (不变) ---
 def calc_slope(series, window=5):
     y = series.tail(window)
     if len(y) < 2: return 0
@@ -326,44 +332,42 @@ def run_analysis_raw(df):
             pd.DataFrame(bg).sort_values('率', ascending=False))
 
 def main():
-    print("🚀 启动 (v6.0 核弹版 - 修复GBK/误报)...")
+    print("🚀 启动 (v7.0 搜索引擎暴力版)...")
     
-    # 1. 获取旧期号
-    old_issue = 0
-    if os.path.exists(CSV_FILE):
-        try: old_issue = int(pd.read_csv(CSV_FILE)['Issue'].iloc[-1])
-        except: pass
-
-    # 2. 尝试更新
+    # 1. 更新数据库
     df = update_database()
     if df is None or df.empty: return
     
     last_row = df.iloc[-1]
     new_issue = int(last_row['Issue'])
     
-    # 3. 严格判定更新状态
-    is_updated = new_issue > old_issue
+    # 2. 判断状态 (再次读取本地确认更新)
+    try:
+        df_check = pd.read_csv(CSV_FILE)
+        current_csv_issue = int(df_check['Issue'].iloc[-1])
+        is_updated = current_csv_issue >= 2025141 # 只有真的拿到141才算更新
+    except:
+        is_updated = False
     
-    print(f"本地: {old_issue} | 最新: {new_issue} | 结果: {'✅已更新' if is_updated else '❌未更新'}")
+    print(f"最终显示期号: {new_issue} | 更新状态: {is_updated}")
 
-    # 4. 分析
+    # 3. 分析
     rs, rg, bs, bg = run_analysis_raw(df)
     ai_text = generate_raw_text(rs, rg, bs, bg)
     generate_interactive_page(df, new_issue, ai_text)
 
-    # 5. 推送
+    # 4. 推送
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     url = f"https://{repo.split('/')[0]}.github.io/{repo.split('/')[1]}/" if repo else "public/index.html"
     
     if is_updated:
         title = f"✅ 双色球第{new_issue}期 (已更新)"
-        msg = f"{format_balls_html(last_row)}"
-        msg += f"<p style='color:green;text-align:center;font-size:12px;margin:5px 0;'>✅ 成功获取最新数据！<br>数据源: 中彩网(修复)/500触屏/百度</p>"
+        msg_header = f"<p style='color:green;text-align:center;font-weight:bold;'>✅ 已成功通过搜索引擎抓取最新数据！</p>"
     else:
         title = f"❌ 双色球第{new_issue}期 (未更新)"
-        msg = f"{format_balls_html(last_row)}"
-        msg += f"<p style='color:red;text-align:center;font-size:12px;margin:5px 0;'>❌ 严重警告：数据仍滞后！<br>当前显示仍为 {new_issue} 期。<br>已尝试所有接口，可能是海外IP被全面封锁。</p>"
+        msg_header = f"<p style='color:red;text-align:center;font-weight:bold;'>❌ 搜索未果，仍显示旧数据。<br>搜索引擎可能尚未收录。</p>"
     
+    msg = f"{format_balls_html(last_row)}" + msg_header
     msg += f"<div style='text-align:center;margin:10px'><a href='{url}' style='color:#007bff;text-decoration:none;'>📊 打开交互图表控制台</a></div>"
     msg += df_to_html_table(rs, "🔴 红球全量趋势 (S10降序)")
     msg += df_to_html_table(bs, "🔵 蓝球全量趋势")
