@@ -3,25 +3,22 @@ import numpy as np
 import requests
 import os
 import re
-from io import StringIO
 
 # ================= 配置区 =================
 PUSH_TOKEN = os.environ.get("PUSH_TOKEN") 
 CSV_FILE = "ssq.csv"
 
-# 手动输入参数 (GitHub Actions)
+# 手动输入参数
 MANUAL_ISSUE_ENV = os.environ.get("MANUAL_ISSUE", "")
 MANUAL_RED_ENV = os.environ.get("MANUAL_RED", "") 
 MANUAL_BLUE_ENV = os.environ.get("MANUAL_BLUE", "")
 
-# 红球 51 魔力分组
 RED_GROUPS = {
     'G01': [1, 19, 31], 'G02': [2, 21, 28], 'G03': [3, 22, 26],
     'G04': [4, 23, 24], 'G05': [5, 16, 30], 'G06': [6, 12, 33],
     'G07': [7, 15, 29], 'G08': [8, 18, 25], 'G09': [9, 10, 32],
     'G10': [11, 13, 27], 'G11': [14, 17, 20]
 }
-# 蓝球 17 互补分组
 BLUE_GROUPS = {
     'G1(01+16)': [1, 16], 'G2(02+15)': [2, 15], 'G3(03+14)': [3, 14],
     'G4(04+13)': [4, 13], 'G5(05+12)': [5, 12], 'G6(06+11)': [6, 11],
@@ -31,7 +28,7 @@ BLUE_GROUPS = {
 def get_headers():
     return {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
 
-# --- 1. 数据获取模块 (手动 + 必应) ---
+# --- 1. 数据获取 ---
 
 def get_manual_data():
     if MANUAL_ISSUE_ENV and MANUAL_RED_ENV and MANUAL_BLUE_ENV:
@@ -82,7 +79,7 @@ def update_database():
             return df_final
     return df_local
 
-# --- 2. 核心计算逻辑 ---
+# --- 2. 分析逻辑 ---
 
 def get_energy(df, targets, type='red'):
     prob = 27/33 if type == 'red' else 15/16
@@ -101,8 +98,7 @@ def calc_slope(series, window=5):
     except: return 0
 
 def analyze_raw_data(df):
-    """只计算数据，不给建议"""
-    # 1. 红球单兵 (四象限)
+    # 红球单兵
     red_single = []
     for b in range(1, 34):
         s = get_energy(df, [b], 'red')
@@ -110,30 +106,27 @@ def analyze_raw_data(df):
         ma10 = s.rolling(10).mean().iloc[-1]
         curr = s.iloc[-1]
         slope = calc_slope(s, 5)
-        
         tag = '☠️双杀'
         if curr > ma5 and curr > ma10: tag = '🔥共振'
         elif curr > ma5 and curr <= ma10: tag = '💰回踩'
         elif curr <= ma5 and curr > ma10: tag = '✨反转'
-        
         red_single.append({'b': b, 's': slope, 'tag': tag})
     
-    # 2. 51魔力分组
+    # 红球分组
     red_groups = []
     for k, v in RED_GROUPS.items():
         s = get_energy(df, v, 'red')
-        slope = calc_slope(s, 10) # 集团军看10期趋势
-        red_groups.append({'name': k, 'balls': v, 's': slope})
+        red_groups.append({'name': k, 'balls': v, 's': calc_slope(s, 10)})
     red_groups.sort(key=lambda x: x['s'], reverse=True)
         
-    # 3. 蓝球单兵
+    # 蓝球单兵
     blue_single = []
     for b in range(1, 17):
         s = get_energy(df, [b], 'blue')
         blue_single.append({'b': b, 's': calc_slope(s, 5)})
     blue_single.sort(key=lambda x: x['s'], reverse=True)
     
-    # 4. 蓝球分组
+    # 蓝球分组
     blue_groups = []
     for k, v in BLUE_GROUPS.items():
         s = get_energy(df, v, 'blue')
@@ -142,34 +135,28 @@ def analyze_raw_data(df):
     
     return red_single, red_groups, blue_single, blue_groups
 
-# --- 3. 生成 AI 专用提示词 (Prompt) ---
+# --- 3. 生成内容 ---
+
 def generate_ai_prompt(issue, r_s, r_g, b_s, b_g):
     t = f"【双色球第 {issue} 期量化情报】\n"
     t += "请根据波浪理论手册v3.0，结合以下数据为我制定方案：\n\n"
-    
     t += "=== 1. 红球单兵 (按象限) ===\n"
-    # 按象限分组输出
     for tag in ['🔥共振', '💰回踩', '✨反转', '☠️双杀']:
         items = sorted([x for x in r_s if x['tag'] == tag], key=lambda x: x['s'], reverse=True)
         nums = ", ".join([f"{x['b']:02d}({x['s']:.1f})" for x in items])
         t += f"{tag}: {nums}\n"
-    
     t += "\n=== 2. 红球51魔力分组 (前5强) ===\n"
     for g in r_g[:5]:
         t += f"{g['name']} (斜率{g['s']:.1f}): {g['balls']}\n"
-        
     t += "\n=== 3. 蓝球单兵 (前5强) ===\n"
     top_b = ", ".join([f"{x['b']:02d}({x['s']:.1f})" for x in b_s[:5]])
     t += f"{top_b}\n"
-    
     t += "\n=== 4. 蓝球分组 (前3强) ===\n"
     for g in b_g[:3]:
         t += f"{g['name']} (斜率{g['s']:.1f}): {g['balls']}\n"
-        
     return t
 
-# --- 4. 生成 HTML 推送 (带一键复制) ---
-def generate_html_msg(issue, last_row, ai_prompt):
+def generate_html_content(issue, last_row, ai_prompt):
     # 开奖球展示
     r_sty = "display:inline-block;width:25px;height:25px;line-height:25px;border-radius:50%;background:#f44336;color:fff;text-align:center;font-weight:bold;margin:2px;"
     b_sty = "display:inline-block;width:25px;height:25px;line-height:25px;border-radius:50%;background:#2196f3;color:fff;text-align:center;font-weight:bold;margin:2px;"
@@ -189,38 +176,65 @@ def generate_html_msg(issue, last_row, ai_prompt):
             <p style='font-size:12px;color:#666;text-align:center;margin:5px 0;'>👇 将下方内容发送给 AI 进行决策</p>
             <textarea id="ai-prompt" style="width:100%;height:300px;font-size:12px;padding:5px;border:1px solid #90caf9;border-radius:5px;font-family:monospace;">{ai_prompt}</textarea>
         </div>
-        
-        <div style='text-align:center;margin-top:10px;'>
-            <p style='font-size:12px;color:#999;'>GitHub Actions 生成 | 波浪理论 v3.0 数据源</p>
-        </div>
     </div>
     """
     return html
 
+# --- 关键修复：保存网页文件 ---
+def save_web_file(html_content, issue):
+    if not os.path.exists("public"): 
+        os.makedirs("public")
+    
+    # 包装一个完整的 HTML 结构
+    full_html = f"""
+    <!DOCTYPE html>
+    <html lang="zh">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>第 {issue} 期 AI 情报</title>
+    </head>
+    <body>
+        {html_content}
+        <script>
+            // 简单的复制脚本
+            var textarea = document.getElementById("ai-prompt");
+            textarea.onclick = function() {{
+                this.select();
+                document.execCommand("copy");
+                alert("已复制分析指令！");
+            }}
+        </script>
+    </body>
+    </html>
+    """
+    
+    with open("public/index.html", "w", encoding='utf-8') as f:
+        f.write(full_html)
+
 def main():
-    print("🚀 启动 v11.0 (侦察兵版)...")
+    print("🚀 启动 v11.1 (部署修复版)...")
     df = update_database()
     if df is None or df.empty: return
     
     last_row = df.iloc[-1]
     issue = int(last_row['Issue'])
-    print(f"✅ 数据期号: {issue}")
     
-    # 1. 计算核心数据
     r_s, r_g, b_s, b_g = analyze_raw_data(df)
-    
-    # 2. 生成 AI Prompt 文本
     ai_prompt = generate_ai_prompt(issue, r_s, r_g, b_s, b_g)
     
-    # 3. 生成 HTML 战报
-    html_msg = generate_html_msg(issue, last_row, ai_prompt)
+    # 生成 HTML 片段
+    html_msg = generate_html_content(issue, last_row, ai_prompt)
     
-    # 4. 推送
+    # 1. 保存到文件 (修复 GitHub Pages 报错)
+    save_web_file(html_msg, issue)
+    
+    # 2. 推送微信
     if PUSH_TOKEN:
         try:
             requests.post('http://www.pushplus.plus/send', json={
                 "token": PUSH_TOKEN, 
-                "title": f"📈 第 {issue} 期量化情报 (请复制给AI)", 
+                "title": f"📈 第 {issue} 期量化情报", 
                 "content": html_msg, 
                 "template": "html"
             })
