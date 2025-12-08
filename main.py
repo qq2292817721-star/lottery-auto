@@ -3,6 +3,7 @@ import numpy as np
 import requests
 import os
 import re
+import sys
 
 # ================= 配置区 =================
 PUSH_TOKEN = os.environ.get("PUSH_TOKEN") 
@@ -43,7 +44,7 @@ def get_manual_data():
 def fetch_bing_search(target_issue):
     url = f"https://www.bing.com/search?q=双色球+{target_issue}+开奖结果"
     try:
-        r = requests.get(url, headers=get_headers(), timeout=10)
+        r = requests.get(url, headers=get_headers()) # 移除 timeout
         nums = re.findall(r'\b([0-3]?[0-9])\b', r.text[:5000])
         valid_nums = [int(n) for n in nums]
         for i in range(len(valid_nums)-7):
@@ -86,9 +87,7 @@ def get_kline_dataframe(scores, period):
         chunk = scores[i : i+period]
         if not chunk: continue
         prev = scores[i-1] if i > 0 else 0
-        chunk_max = max(chunk); chunk_min = min(chunk)
-        real_high = max(prev, chunk_max); real_low = min(prev, chunk_min)
-        ohlc.append([prev, real_high, real_low, chunk[-1]])
+        ohlc.append([prev, max(prev, max(chunk)), min(prev, min(chunk)), chunk[-1]])
     return pd.DataFrame(ohlc, columns=['Open', 'High', 'Low', 'Close'])
 
 def analyze_trend_from_kline(df_kline, ma_window):
@@ -105,12 +104,11 @@ def analyze_red_single(df):
     results = []
     cols = ['R1','R2','R3','R4','R5','R6']
     for ball in range(1, 34):
-        prob_hit = 6/33; prob_miss = 27/33
         is_hit = df[cols].isin([ball]).any(axis=1)
         scores = []; curr = 0
         for hit in is_hit:
-            if hit: curr += prob_miss
-            else: curr -= prob_hit
+            if hit: curr += 27/33
+            else: curr -= 6/33
             scores.append(curr)
         
         df_10 = get_kline_dataframe(scores, 10)
@@ -154,12 +152,12 @@ def analyze_red_groups(df):
         
         tag = ""; prio = 0
         if above_ma:
-            if slope > 2: tag = "🔥集团冲锋"; prio = 5
-            elif slope > 0: tag = "📈稳步上升"; prio = 4
-            else: tag = "⚠️高位滞涨"; prio = 3
+            if slope > 2: tag = "🔥冲锋"; prio = 5
+            elif slope > 0: tag = "📈稳升"; prio = 4
+            else: tag = "⚠️滞涨"; prio = 3
         else:
-            if slope > 0.5: tag = "🚀底部复苏"; prio = 4.5
-            else: tag = "☠️弱势群体"; prio = 0
+            if slope > 0.5: tag = "🚀复苏"; prio = 4.5
+            else: tag = "☠️弱势"; prio = 0
         results.append({'name': name, 'balls': str(balls), 's': slope, 'tag': tag, 'prio': prio})
     results.sort(key=lambda x: (x['prio'], x['s']), reverse=True)
     return results
@@ -167,13 +165,12 @@ def analyze_red_groups(df):
 # C. 蓝球单兵
 def analyze_blue_single(df):
     results = []
-    prob_hit = 1/16; prob_miss = 15/16
     for ball in range(1, 17):
         is_hit = (df['Blue'] == ball)
         scores = []; curr = 0
         for hit in is_hit:
-            if hit: curr += prob_miss * 5
-            else: curr -= prob_hit
+            if hit: curr += 15/16 * 5
+            else: curr -= 1/16
             scores.append(curr)
         
         df_10 = get_kline_dataframe(scores, 10)
@@ -183,11 +180,11 @@ def analyze_blue_single(df):
         
         tag = ""; prio = 0
         if ma5:
-            if ma10: tag = "🔥皇冠热号"; prio = 5
-            else: tag = "💰黄金回踩"; prio = 4
+            if ma10: tag = "🔥皇冠"; prio = 5
+            else: tag = "💰回踩"; prio = 4
         else:
-            if ma10: tag = "🚀妖股启动"; prio = 4.5
-            else: tag = "☠️极寒深渊"; prio = 0
+            if ma10: tag = "🚀启动"; prio = 4.5
+            else: tag = "☠️深渊"; prio = 0
         results.append({'ball': ball, 's': s3, 'tag': tag, 'prio': prio})
     results.sort(key=lambda x: (x['prio'], x['s']), reverse=True)
     return results
@@ -195,13 +192,12 @@ def analyze_blue_single(df):
 # D. 蓝球分组
 def analyze_blue_groups(df):
     results = []
-    prob_hit = 1/8; prob_miss = 7/8
     for name, balls in BLUE_GROUPS.items():
         is_hit = df['Blue'].isin(balls)
         scores = []; curr = 0
         for hit in is_hit:
-            if hit: curr += prob_miss * 2
-            else: curr -= prob_hit
+            if hit: curr += 7/8 * 2
+            else: curr -= 1/8
             scores.append(curr)
         
         recent = scores[-20:]
@@ -211,139 +207,129 @@ def analyze_blue_groups(df):
         
         tag = ""; prio = 0
         if above_ma:
-            if slope > 1: tag = "🔥强势拉升"; prio = 5
-            else: tag = "⚠️高位震荡"; prio = 3
+            if slope > 1: tag = "🔥拉升"; prio = 5
+            else: tag = "⚠️震荡"; prio = 3
         else:
-            if slope > 0: tag = "🚀底部启动"; prio = 4
-            else: tag = "☠️下跌通道"; prio = 0
+            if slope > 0: tag = "🚀启动"; prio = 4
+            else: tag = "☠️下跌"; prio = 0
         results.append({'name': name, 'balls': str(balls), 's': slope, 'tag': tag, 'prio': prio})
     results.sort(key=lambda x: (x['prio'], x['s']), reverse=True)
     return results
 
-# --- 3. 生成全景 HTML 报表 ---
+# --- 3. 生成全景 HTML 报表 (瘦身版) ---
 
 def build_full_report(issue, last_row, r_s, r_g, b_s, b_g):
-    style_card = "background:#fff; border-radius:8px; padding:10px; margin-bottom:12px; box-shadow:0 1px 2px rgba(0,0,0,0.1);"
-    style_table = "width:100%; border-collapse:collapse; font-size:11px; text-align:center;"
-    style_th = "background:#f0f0f0; padding:4px; border-bottom:2px solid #ddd; color:#333; font-weight:bold; white-space:nowrap;"
-    style_td = "padding:4px; border-bottom:1px solid #eee;"
+    # 瘦身CSS: 将样式移入变量，减少重复字符
+    st_t = "width:100%;font-size:11px;text-align:center;border-collapse:collapse;"
+    st_th = "background:#eee;padding:4px;border-bottom:1px solid #ccc;"
+    st_td = "padding:4px;border-bottom:1px solid #eee;"
     
-    r_ball = "".join([f"<span style='display:inline-block;width:22px;height:22px;line-height:22px;background:#f44336;color:#fff;border-radius:50%;margin:1px;font-size:12px;'>{last_row[f'R{i}']:02d}</span>" for i in range(1,7)])
-    b_ball = f"<span style='display:inline-block;width:22px;height:22px;line-height:22px;background:#2196f3;color:#fff;border-radius:50%;margin:1px;font-size:12px;'>{last_row['Blue']:02d}</span>"
+    r_ball = "".join([f"<b style='color:#f44336;margin:1px'>{last_row[f'R{i}']:02d}</b>" for i in range(1,7)])
+    b_ball = f"<b style='color:#2196f3;margin:1px'>{last_row['Blue']:02d}</b>"
     
-    html = f"""
-    <div style='font-family:-apple-system, sans-serif; background:#f2f3f5; padding:8px;'>
-        <div style='{style_card} text-align:center;'>
-            <h4 style='margin:0 0 5px 0;'>📊 第 {issue} 期全景扫描 (v15.1)</h4>
-            <div>{r_ball}{b_ball}</div>
-        </div>
-    """
+    html = f"<div style='font-family:sans-serif;background:#f9f9f9;padding:10px;'>"
+    html += f"<h3 style='text-align:center;margin:0;'>📊 第{issue}期战报</h3>"
+    html += f"<div style='text-align:center;font-size:14px;'>{r_ball} + {b_ball}</div>"
     
-    # 2. 红球单兵
-    html += f"<div style='{style_card}'><h4 style='margin:0 0 8px 0; border-left:4px solid #f44336; padding-left:6px;'>🔴 红球单兵 (全量)</h4>"
-    html += f"<table style='{style_table}'><tr><th style='{style_th}'>号</th><th style='{style_th}'>S10</th><th style='{style_th}'>MA5</th><th style='{style_th}'>S3</th><th style='{style_th}'>MA10</th><th style='{style_th}'>诊断</th></tr>"
+    # 红球表
+    html += f"<h4 style='margin:10px 0 5px 0;color:#d32f2f;'>🔴 红球单兵 (S10/MA5/S3/MA10)</h4>"
+    html += f"<table style='{st_t}'><tr><th style='{st_th}'>号</th><th style='{st_th}'>S10</th><th style='{st_th}'>MA5</th><th style='{st_th}'>S3</th><th style='{st_th}'>MA10</th><th style='{st_th}'>态</th></tr>"
     for row in r_s:
-        bg = "#ffebee" if "🔥" in row['tag'] else ("#fffde7" if "💰" in row['tag'] else ("#f5f5f5" if "☠️" in row['tag'] else "#fff"))
-        m5 = "✅" if row['ma5'] else "❌"; m10 = "✅" if row['ma10'] else "❌"
-        html += f"<tr style='background:{bg};'><td style='{style_td} font-weight:bold;'>{row['ball']:02d}</td><td style='{style_td}'>{row['s10']:.1f}</td><td style='{style_td}'>{m5}</td><td style='{style_td}'>{row['s3']:.1f}</td><td style='{style_td}'>{m10}</td><td style='{style_td} font-size:10px;text-align:left;'>{row['tag']}</td></tr>"
-    html += "</table></div>"
+        c = "#ffebee" if "🔥" in row['tag'] else ("#fff" if "☠️" in row['tag'] else "#fffde7")
+        m5 = "√" if row['ma5'] else "×"; m10 = "√" if row['ma10'] else "×"
+        html += f"<tr style='background:{c};'><td style='{st_td}'><b>{row['ball']:02d}</b></td><td style='{st_td}'>{row['s10']:.1f}</td><td style='{st_td}'>{m5}</td><td style='{st_td}'>{row['s3']:.1f}</td><td style='{st_td}'>{m10}</td><td style='{st_td}'>{row['tag']}</td></tr>"
+    html += "</table>"
     
-    # 3. 红球分组
-    html += f"<div style='{style_card}'><h4 style='margin:0 0 8px 0; border-left:4px solid #ff9800; padding-left:6px;'>🛡️ 红球分组 (全量)</h4>"
-    html += f"<table style='{style_table}'><tr><th style='{style_th}'>组名</th><th style='{style_th}'>斜率</th><th style='{style_th}'>趋势</th><th style='{style_th}'>号码</th></tr>"
+    # 分组表
+    html += f"<h4 style='margin:10px 0 5px 0;color:#f57c00;'>🛡️ 魔力分组</h4>"
+    html += f"<table style='{st_t}'><tr><th style='{st_th}'>组</th><th style='{st_th}'>斜率</th><th style='{st_th}'>态</th><th style='{st_th}'>号</th></tr>"
     for g in r_g:
-        html += f"<tr><td style='{style_td}'><b>{g['name']}</b></td><td style='{style_td}'>{g['s']:.1f}</td><td style='{style_td}'>{g['tag']}</td><td style='{style_td} font-size:9px;color:#666;'>{g['balls']}</td></tr>"
-    html += "</table></div>"
+        html += f"<tr><td style='{st_td}'><b>{g['name']}</b></td><td style='{st_td}'>{g['s']:.1f}</td><td style='{st_td}'>{g['tag']}</td><td style='{st_td} font-size:10px;'>{g['balls']}</td></tr>"
+    html += "</table>"
     
-    # 4. 蓝球单兵
-    html += f"<div style='{style_card}'><h4 style='margin:0 0 8px 0; border-left:4px solid #2196f3; padding-left:6px;'>🔵 蓝球单兵 (全量)</h4>"
-    html += f"<table style='{style_table}'><tr><th style='{style_th}'>号</th><th style='{style_th}'>斜率(S3)</th><th style='{style_th}'>诊断</th></tr>"
+    # 蓝球表
+    html += f"<h4 style='margin:10px 0 5px 0;color:#1976d2;'>🔵 蓝球单兵</h4>"
+    html += f"<table style='{st_t}'><tr><th style='{st_th}'>号</th><th style='{st_th}'>斜率</th><th style='{st_th}'>态</th></tr>"
     for b in b_s:
-        bg = "#e3f2fd" if "🔥" in b['tag'] else "#fff"
-        html += f"<tr style='background:{bg};'><td style='{style_td} font-weight:bold;'>{b['ball']:02d}</td><td style='{style_td}'>{b['s']:.1f}</td><td style='{style_td}'>{b['tag']}</td></tr>"
-    html += "</table></div>"
+        c = "#e3f2fd" if "🔥" in b['tag'] else "#fff"
+        html += f"<tr style='background:{c};'><td style='{st_td}'><b>{b['ball']:02d}</b></td><td style='{st_td}'>{b['s']:.1f}</td><td style='{st_td}'>{b['tag']}</td></tr>"
+    html += "</table>"
     
-    # 5. 蓝球分组
-    html += f"<div style='{style_card}'><h4 style='margin:0 0 8px 0; border-left:4px solid #3f51b5; padding-left:6px;'>👥 蓝球分组 (全量)</h4>"
-    html += f"<table style='{style_table}'><tr><th style='{style_th}'>组名</th><th style='{style_th}'>斜率</th><th style='{style_th}'>趋势</th><th style='{style_th}'>号码</th></tr>"
+    # 蓝球分组表
+    html += f"<h4 style='margin:10px 0 5px 0;color:#303f9f;'>👥 蓝球分组</h4>"
+    html += f"<table style='{st_t}'><tr><th style='{st_th}'>组</th><th style='{st_th}'>斜率</th><th style='{st_th}'>态</th><th style='{st_th}'>号</th></tr>"
     for g in b_g:
-        html += f"<tr><td style='{style_td}'><b>{g['name']}</b></td><td style='{style_td}'>{g['s']:.1f}</td><td style='{style_td}'>{g['tag']}</td><td style='{style_td} font-size:9px;color:#666;'>{g['balls']}</td></tr>"
-    html += "</table></div>"
+        html += f"<tr><td style='{st_td}'><b>{g['name']}</b></td><td style='{st_td}'>{g['s']:.1f}</td><td style='{st_td}'>{g['tag']}</td><td style='{st_td} font-size:10px;'>{g['balls']}</td></tr>"
+    html += "</table>"
     
-    # 6. AI 复制区
-    ai_text = generate_ai_text(issue, r_s, r_g, b_s, b_g)
-    html += f"<div style='{style_card} background:#e8eaf6; border:1px dashed #3f51b5;'>"
-    html += f"<h4 style='margin:0 0 5px 0; text-align:center; color:#303f9f;'>🤖 AI 全量数据包 (长按复制)</h4>"
-    html += f"<textarea id='ai-data' style='width:100%; height:80px; font-size:10px; border:1px solid #c5cae9; padding:5px; resize:none;'>{ai_text}</textarea>"
-    html += "</div></div>"
-    
+    # AI复制区
+    ai = generate_ai_text(issue, r_s, r_g, b_s, b_g)
+    html += f"<div style='margin-top:10px;border:1px dashed #666;padding:5px;background:#fff;'><h5 style='margin:0;text-align:center;'>🤖 AI数据包 (复制)</h5><textarea style='width:100%;height:60px;font-size:10px;border:none;'>{ai}</textarea></div></div>"
     return html
 
 def generate_ai_text(issue, r_s, r_g, b_s, b_g):
-    t = f"【第{issue}期 全量数据报告】\n"
-    t += "1.红球详细(号,S10,MA5,S3,MA10,态):\n"
+    t = f"【第{issue}期数据】\n1.红球单兵(号,S10,MA5,S3,MA10,态):\n"
     for row in r_s:
-        m5 = "1" if row['ma5'] else "0"; m10 = "1" if row['ma10'] else "0"
-        t += f"{row['ball']:02d},{row['s10']:.1f},{m5},{row['s3']:.1f},{m10},{row['tag']} | "
-    t += "\n\n2.红球分组(全量):\n"
+        m5="1" if row['ma5'] else "0"; m10="1" if row['ma10'] else "0"
+        t += f"{row['ball']:02d},{row['s10']:.1f},{m5},{row['s3']:.1f},{m10},{row['tag']}|"
+    t += "\n2.红球分组:\n"
     for g in r_g: t += f"{g['name']}(S:{g['s']:.1f}):{g['balls']}\n"
-    t += "\n3.蓝球单兵(全量):\n"
+    t += "\n3.蓝球单兵:\n"
     for b in b_s: t += f"{b['ball']:02d}(S:{b['s']:.1f}):{b['tag']}\n"
-    t += "\n4.蓝球分组(全量):\n"
+    t += "\n4.蓝球分组:\n"
     for g in b_g: t += f"{g['name']}(S:{g['s']:.1f})\n"
     return t
 
 def save_web_file(html_content, issue):
     if not os.path.exists("public"): os.makedirs("public")
-    full_html = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>第{issue}期全景报表</title></head><body style="margin:0;padding:0;">{html_content}</body></html>"""
+    full_html = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>第{issue}期战报</title></head><body style="margin:0;padding:0;">{html_content}</body></html>"""
     with open("public/index.html", "w", encoding='utf-8') as f: f.write(full_html)
 
 # --- 主程序 ---
 
 def main():
-    print("🚀 启动 v15.1 (推送修复+数据强制输出版)...")
+    print("🚀 启动 v15.2 (稳定推送版)...")
     
-    # 调试: 检查 PUSH_TOKEN
     if not PUSH_TOKEN:
-        print("❌ 警告：未检测到 PUSH_TOKEN，无法推送微信消息！")
-    else:
-        print(f"✅ 检测到 PUSH_TOKEN，准备推送。")
-
+        print("🔴 严重警告：PUSH_TOKEN 未设置，无法推送！")
+        
     df = update_database()
-    
-    # 修改逻辑：如果 df 为 None，尝试读取本地 CSV 兜底，确保有东西可推
     if df is None or df.empty:
+        # 尝试读取本地兜底
         if os.path.exists(CSV_FILE):
-            print("⚠️ 自动获取失败，尝试使用本地数据兜底...")
             df = pd.read_csv(CSV_FILE)
         else:
-            print("❌ 无法获取任何数据。")
+            print("❌ 无数据可用。")
             return
-    
+            
     last_row = df.iloc[-1]
     issue = int(last_row['Issue'])
-    print(f"📊 正在生成第 {issue} 期报表...")
     
+    # 计算
     r_s = analyze_red_single(df)
     r_g = analyze_red_groups(df)
     b_s = analyze_blue_single(df)
     b_g = analyze_blue_groups(df)
     
+    # 生成
     html_msg = build_full_report(issue, last_row, r_s, r_g, b_s, b_g)
     save_web_file(html_msg, issue)
     
+    # 推送 (移除 try-except，让错误暴露)
     if PUSH_TOKEN:
-        print("🚀 发起 PushPlus 推送请求...")
-        try:
-            r = requests.post('http://www.pushplus.plus/send', json={
-                "token": PUSH_TOKEN, 
-                "title": f"📊 第 {issue} 期全景数据", 
-                "content": html_msg, 
-                "template": "html"
-            }, timeout=10) # 增加 timeout 防止卡死
-            print(f"📡 推送响应: {r.status_code} - {r.text}")
-        except Exception as e: 
-            print(f"❌ 推送发生异常: {e}")
+        print(f"📡 正在推送第 {issue} 期战报...")
+        # 移除 timeout，让它自然等待
+        resp = requests.post('http://www.pushplus.plus/send', json={
+            "token": PUSH_TOKEN, 
+            "title": f"📊 第 {issue} 期全景战报", 
+            "content": html_msg, 
+            "template": "html"
+        })
+        print(f"📥 推送结果: {resp.status_code} - {resp.text}")
+        
+        # 如果推送失败，主动报错，让 Action 变红
+        if resp.status_code != 200:
+            raise Exception(f"PushPlus API Error: {resp.text}")
 
 if __name__ == "__main__":
     main()
