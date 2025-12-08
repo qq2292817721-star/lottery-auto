@@ -4,6 +4,7 @@ import requests
 import os
 import re
 import sys
+import json
 
 # ================= 配置区 =================
 PUSH_TOKEN = os.environ.get("PUSH_TOKEN") 
@@ -44,7 +45,7 @@ def get_manual_data():
 def fetch_bing_search(target_issue):
     url = f"https://www.bing.com/search?q=双色球+{target_issue}+开奖结果"
     try:
-        r = requests.get(url, headers=get_headers()) # 移除 timeout
+        r = requests.get(url, headers=get_headers())
         nums = re.findall(r'\b([0-3]?[0-9])\b', r.text[:5000])
         valid_nums = [int(n) for n in nums]
         for i in range(len(valid_nums)-7):
@@ -216,120 +217,141 @@ def analyze_blue_groups(df):
     results.sort(key=lambda x: (x['prio'], x['s']), reverse=True)
     return results
 
-# --- 3. 生成全景 HTML 报表 (瘦身版) ---
+# --- 3. 极速生成 HTML (压缩体积版) ---
 
-def build_full_report(issue, last_row, r_s, r_g, b_s, b_g):
-    # 瘦身CSS: 将样式移入变量，减少重复字符
-    st_t = "width:100%;font-size:11px;text-align:center;border-collapse:collapse;"
-    st_th = "background:#eee;padding:4px;border-bottom:1px solid #ccc;"
-    st_td = "padding:4px;border-bottom:1px solid #eee;"
+def build_compressed_report(issue, last_row, r_s, r_g, b_s, b_g):
+    # CSS 压缩：使用简写类名
+    css = """<style>
+    body{font-family:sans-serif;background:#f2f3f5;padding:5px}
+    .c{background:#fff;border-radius:6px;padding:8px;margin-bottom:10px;text-align:center}
+    .t{width:100%;font-size:10px;border-collapse:collapse}
+    .t th{background:#eee;padding:3px}
+    .t td{padding:3px;border-bottom:1px solid #eee}
+    .b-r{display:inline-block;width:20px;height:20px;line-height:20px;background:#f44336;color:#fff;border-radius:50%;margin:1px;font-size:11px}
+    .b-b{display:inline-block;width:20px;height:20px;line-height:20px;background:#2196f3;color:#fff;border-radius:50%;margin:1px;font-size:11px}
+    .bg-1{background:#ffebee}.bg-2{background:#fffde7}.bg-3{background:#f5f5f5}
+    </style>"""
     
-    r_ball = "".join([f"<b style='color:#f44336;margin:1px'>{last_row[f'R{i}']:02d}</b>" for i in range(1,7)])
-    b_ball = f"<b style='color:#2196f3;margin:1px'>{last_row['Blue']:02d}</b>"
+    # 头部
+    r_balls = "".join([f"<span class='b-r'>{last_row[f'R{i}']:02d}</span>" for i in range(1,7)])
+    b_ball = f"<span class='b-b'>{last_row['Blue']:02d}</span>"
     
-    html = f"<div style='font-family:sans-serif;background:#f9f9f9;padding:10px;'>"
-    html += f"<h3 style='text-align:center;margin:0;'>📊 第{issue}期战报</h3>"
-    html += f"<div style='text-align:center;font-size:14px;'>{r_ball} + {b_ball}</div>"
+    html = f"<html><head>{css}</head><body>"
+    html += f"<div class='c'><h4>第{issue}期战报 (v16.0)</h4>{r_balls}{b_ball}</div>"
     
     # 红球表
-    html += f"<h4 style='margin:10px 0 5px 0;color:#d32f2f;'>🔴 红球单兵 (S10/MA5/S3/MA10)</h4>"
-    html += f"<table style='{st_t}'><tr><th style='{st_th}'>号</th><th style='{st_th}'>S10</th><th style='{st_th}'>MA5</th><th style='{st_th}'>S3</th><th style='{st_th}'>MA10</th><th style='{st_th}'>态</th></tr>"
-    for row in r_s:
-        c = "#ffebee" if "🔥" in row['tag'] else ("#fff" if "☠️" in row['tag'] else "#fffde7")
-        m5 = "√" if row['ma5'] else "×"; m10 = "√" if row['ma10'] else "×"
-        html += f"<tr style='background:{c};'><td style='{st_td}'><b>{row['ball']:02d}</b></td><td style='{st_td}'>{row['s10']:.1f}</td><td style='{st_td}'>{m5}</td><td style='{st_td}'>{row['s3']:.1f}</td><td style='{st_td}'>{m10}</td><td style='{st_td}'>{row['tag']}</td></tr>"
-    html += "</table>"
+    html += "<div class='c'><b>🔴红球单兵</b><table class='t'><tr><th>号</th><th>S10</th><th>M5</th><th>S3</th><th>M10</th><th>态</th></tr>"
+    for r in r_s:
+        cls = "bg-1" if "🔥" in r['tag'] else ("bg-2" if "💰" in r['tag'] else ("bg-3" if "☠️" in r['tag'] else ""))
+        m5, m10 = ("√" if r['ma5'] else "×"), ("√" if r['ma10'] else "×")
+        html += f"<tr class='{cls}'><td>{r['ball']:02d}</td><td>{r['s10']:.1f}</td><td>{m5}</td><td>{r['s3']:.1f}</td><td>{m10}</td><td>{r['tag']}</td></tr>"
+    html += "</table></div>"
     
     # 分组表
-    html += f"<h4 style='margin:10px 0 5px 0;color:#f57c00;'>🛡️ 魔力分组</h4>"
-    html += f"<table style='{st_t}'><tr><th style='{st_th}'>组</th><th style='{st_th}'>斜率</th><th style='{st_th}'>态</th><th style='{st_th}'>号</th></tr>"
+    html += "<div class='c'><b>🛡️红球分组</b><table class='t'><tr><th>组</th><th>斜</th><th>态</th><th>号</th></tr>"
     for g in r_g:
-        html += f"<tr><td style='{st_td}'><b>{g['name']}</b></td><td style='{st_td}'>{g['s']:.1f}</td><td style='{st_td}'>{g['tag']}</td><td style='{st_td} font-size:10px;'>{g['balls']}</td></tr>"
-    html += "</table>"
+        html += f"<tr><td>{g['name']}</td><td>{g['s']:.1f}</td><td>{g['tag']}</td><td>{g['balls']}</td></tr>"
+    html += "</table></div>"
     
     # 蓝球表
-    html += f"<h4 style='margin:10px 0 5px 0;color:#1976d2;'>🔵 蓝球单兵</h4>"
-    html += f"<table style='{st_t}'><tr><th style='{st_th}'>号</th><th style='{st_th}'>斜率</th><th style='{st_th}'>态</th></tr>"
+    html += "<div class='c'><b>🔵蓝球单兵</b><table class='t'><tr><th>号</th><th>斜</th><th>态</th></tr>"
     for b in b_s:
-        c = "#e3f2fd" if "🔥" in b['tag'] else "#fff"
-        html += f"<tr style='background:{c};'><td style='{st_td}'><b>{b['ball']:02d}</b></td><td style='{st_td}'>{b['s']:.1f}</td><td style='{st_td}'>{b['tag']}</td></tr>"
-    html += "</table>"
+        cls = "bg-1" if "🔥" in b['tag'] else ""
+        html += f"<tr class='{cls}'><td>{b['ball']:02d}</td><td>{b['s']:.1f}</td><td>{b['tag']}</td></tr>"
+    html += "</table></div>"
     
     # 蓝球分组表
-    html += f"<h4 style='margin:10px 0 5px 0;color:#303f9f;'>👥 蓝球分组</h4>"
-    html += f"<table style='{st_t}'><tr><th style='{st_th}'>组</th><th style='{st_th}'>斜率</th><th style='{st_th}'>态</th><th style='{st_th}'>号</th></tr>"
+    html += "<div class='c'><b>👥蓝球分组</b><table class='t'><tr><th>组</th><th>斜</th><th>态</th><th>号</th></tr>"
     for g in b_g:
-        html += f"<tr><td style='{st_td}'><b>{g['name']}</b></td><td style='{st_td}'>{g['s']:.1f}</td><td style='{st_td}'>{g['tag']}</td><td style='{st_td} font-size:10px;'>{g['balls']}</td></tr>"
-    html += "</table>"
+        html += f"<tr><td>{g['name']}</td><td>{g['s']:.1f}</td><td>{g['tag']}</td><td>{g['balls']}</td></tr>"
+    html += "</table></div>"
     
-    # AI复制区
+    # AI 复制区
     ai = generate_ai_text(issue, r_s, r_g, b_s, b_g)
-    html += f"<div style='margin-top:10px;border:1px dashed #666;padding:5px;background:#fff;'><h5 style='margin:0;text-align:center;'>🤖 AI数据包 (复制)</h5><textarea style='width:100%;height:60px;font-size:10px;border:none;'>{ai}</textarea></div></div>"
+    html += f"<div class='c'><b>🤖AI指令(复制)</b><textarea style='width:100%;height:60px;font-size:10px;border:1px solid #ccc'>{ai}</textarea></div>"
+    html += "</body></html>"
     return html
 
 def generate_ai_text(issue, r_s, r_g, b_s, b_g):
-    t = f"【第{issue}期数据】\n1.红球单兵(号,S10,MA5,S3,MA10,态):\n"
+    t = f"第{issue}期数据:\n1.红球(号,S10,M5,S3,M10,态):\n"
     for row in r_s:
         m5="1" if row['ma5'] else "0"; m10="1" if row['ma10'] else "0"
-        t += f"{row['ball']:02d},{row['s10']:.1f},{m5},{row['s3']:.1f},{m10},{row['tag']}|"
-    t += "\n2.红球分组:\n"
+        t += f"{row['ball']},{row['s10']:.1f},{m5},{row['s3']:.1f},{m10},{row['tag']}|"
+    t += "\n2.红组:\n"
     for g in r_g: t += f"{g['name']}(S:{g['s']:.1f}):{g['balls']}\n"
-    t += "\n3.蓝球单兵:\n"
-    for b in b_s: t += f"{b['ball']:02d}(S:{b['s']:.1f}):{b['tag']}\n"
-    t += "\n4.蓝球分组:\n"
+    t += "\n3.蓝单:\n"
+    for b in b_s: t += f"{b['ball']}(S:{b['s']:.1f}):{b['tag']}\n"
+    t += "\n4.蓝组:\n"
     for g in b_g: t += f"{g['name']}(S:{g['s']:.1f})\n"
     return t
 
 def save_web_file(html_content, issue):
     if not os.path.exists("public"): os.makedirs("public")
-    full_html = f"""<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>第{issue}期战报</title></head><body style="margin:0;padding:0;">{html_content}</body></html>"""
-    with open("public/index.html", "w", encoding='utf-8') as f: f.write(full_html)
+    with open("public/index.html", "w", encoding='utf-8') as f: f.write(html_content)
 
 # --- 主程序 ---
 
 def main():
-    print("🚀 启动 v15.2 (稳定推送版)...")
+    print("🚀 启动 v16.0 (诊断修复版)...")
     
+    # 1. 诊断 Token
     if not PUSH_TOKEN:
-        print("🔴 严重警告：PUSH_TOKEN 未设置，无法推送！")
-        
+        print("❌ 错误：未检测到 PUSH_TOKEN！请在 Secrets 中配置。")
+        return
+    else:
+        print(f"✅ Token 已加载: {PUSH_TOKEN[:4]}******")
+
+    # 2. 获取数据
     df = update_database()
     if df is None or df.empty:
-        # 尝试读取本地兜底
         if os.path.exists(CSV_FILE):
+            print("⚠️ 使用本地旧数据兜底...")
             df = pd.read_csv(CSV_FILE)
         else:
-            print("❌ 无数据可用。")
+            print("❌ 无数据，退出。")
             return
             
     last_row = df.iloc[-1]
     issue = int(last_row['Issue'])
     
-    # 计算
+    # 3. 计算
     r_s = analyze_red_single(df)
     r_g = analyze_red_groups(df)
     b_s = analyze_blue_single(df)
     b_g = analyze_blue_groups(df)
     
-    # 生成
-    html_msg = build_full_report(issue, last_row, r_s, r_g, b_s, b_g)
+    # 4. 生成报表 (极度压缩版)
+    html_msg = build_compressed_report(issue, last_row, r_s, r_g, b_s, b_g)
+    print(f"📄 HTML 报表大小: {len(html_msg)} 字符")
     save_web_file(html_msg, issue)
     
-    # 推送 (移除 try-except，让错误暴露)
-    if PUSH_TOKEN:
-        print(f"📡 正在推送第 {issue} 期战报...")
-        # 移除 timeout，让它自然等待
+    # 5. 推送 (带双重保险)
+    print("📡 开始推送...")
+    try:
+        # 尝试发送完整版
         resp = requests.post('http://www.pushplus.plus/send', json={
             "token": PUSH_TOKEN, 
             "title": f"📊 第 {issue} 期全景战报", 
             "content": html_msg, 
             "template": "html"
         })
-        print(f"📥 推送结果: {resp.status_code} - {resp.text}")
+        print(f"📥 响应: {resp.text}")
         
-        # 如果推送失败，主动报错，让 Action 变红
-        if resp.status_code != 200:
-            raise Exception(f"PushPlus API Error: {resp.text}")
+        # 检查是否真的成功 (PushPlus 有时返回 200 但 code!=200)
+        res_json = resp.json()
+        if res_json.get('code') != 200:
+            print("❌ 完整版推送失败，尝试发送简报...")
+            raise Exception("Full report failed")
+            
+    except Exception as e:
+        # 兜底：发送纯文本简报
+        print(f"⚠️ 切换到兜底模式: {e}")
+        simple_msg = f"第 {issue} 期数据已生成。\n由于完整报表过大，请访问网页查看。\n\nAI指令:\n{generate_ai_text(issue, r_s, r_g, b_s, b_g)}"
+        requests.post('http://www.pushplus.plus/send', json={
+            "token": PUSH_TOKEN, 
+            "title": f"⚠️ 第 {issue} 期简报 (完整版失败)", 
+            "content": simple_msg
+        })
 
 if __name__ == "__main__":
     main()
