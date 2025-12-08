@@ -1,9 +1,25 @@
 name: Lottery Auto Run
 
 on:
+  # 定时触发 (保持你原来的设置：每周二、四、日 UTC 13:30，即北京时间 21:30)
   schedule:
     - cron: '30 13 * * 2,4,0'
+  
+  # 手动触发 (新增输入框配置)
   workflow_dispatch:
+    inputs:
+      issue:
+        description: '【必填】最新期号 (如 2025141)'
+        required: false
+        type: string
+      red:
+        description: '【必填】红球 (逗号分隔, 如 01,02,03,04,05,06)'
+        required: false
+        type: string
+      blue:
+        description: '【必填】蓝球 (如 07)'
+        required: false
+        type: string
 
 # 必须赋予写权限，否则无法推送更新后的 CSV
 permissions:
@@ -27,19 +43,24 @@ jobs:
           pip install pandas requests lxml plotly html5lib beautifulsoup4
 
       - name: Run analysis script
+        # 这里是将 GitHub 页面输入的参数传递给 Python 脚本的关键步骤
         env:
           PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          # 映射手动输入的值到环境变量
+          MANUAL_ISSUE: ${{ github.event.inputs.issue }}
+          MANUAL_RED: ${{ github.event.inputs.red }}
+          MANUAL_BLUE: ${{ github.event.inputs.blue }}
         run: python main.py
 
-      # --- 新增步骤：把更新后的 ssq.csv 存回仓库 ---
+      # 把更新后的 ssq.csv 存回仓库
       - name: Commit and push database
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git add ssq.csv
           # 如果有变动才提交，否则不报错
-          git commit -m "Update ssq.csv database" || echo "No changes to commit"
+          git commit -m "Update ssq.csv database [skip ci]" || echo "No changes to commit"
           git push
 
       - name: Deploy to GitHub Pages
