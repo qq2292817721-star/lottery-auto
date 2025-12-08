@@ -12,6 +12,12 @@ from io import StringIO
 PUSH_TOKEN = os.environ.get("PUSH_TOKEN") 
 CSV_FILE = "ssq.csv"
 
+# 【核按钮】如果实在抓不到，请手动修改下方变量为 True，并填入号码
+# 格式：MANUAL_ISSUE = 2025141, MANUAL_NUMS = [红1, 红2, 红3, 红4, 红5, 红6, 蓝]
+USE_MANUAL = False 
+MANUAL_ISSUE = 2025141
+MANUAL_NUMS = [2, 4, 5, 10, 12, 13, 6] 
+
 RED_GROUPS = {
     'G01': [1, 19, 31], 'G02': [2, 21, 28], 'G03': [3, 22, 26],
     'G04': [4, 23, 24], 'G05': [5, 16, 30], 'G06': [6, 12, 33],
@@ -26,175 +32,148 @@ BLUE_GROUPS = {
 # ========================================
 
 def get_headers():
+    # 模拟标准的 Chrome 浏览器
     return {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Cache-Control': 'no-cache',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     }
 
-# --- 1. 搜索引擎 & 地方官网 抓取模块 (Search Engine Fetchers) ---
+# --- 1. 搜索引擎抓取模块 (针对 Bing/Sogou 优化) ---
 
-def extract_numbers_from_text(text, target_issue):
+def extract_from_text(text, target_issue):
     """
-    通用暴力解析器：在文本中寻找 目标期号 及其后的 7 个数字
+    通用解析器：在 HTML 源码中寻找 [期号] 周围的 [7个数字]
     """
-    # 正则逻辑：
-    # 1. 找到期号 (比如 2025141)
-    # 2. 后面可能跟着日期、文字等杂质
-    # 3. 提取随后出现的 6个红球(01-33) 和 1个蓝球(01-16)
-    # 4. 容错：数字之间允许有空格、HTML标签、逗号等
+    # 1. 简单清洗 HTML 标签
+    clean_text = re.sub(r'<[^>]+>', ' ', text)
     
-    # 寻找期号出现的位置
+    # 2. 定位期号
     issue_str = str(target_issue)
-    if issue_str not in text:
+    if issue_str not in clean_text:
         return None
     
-    # 截取期号后面的文本 (限制长度500字符，防止匹配到无关内容)
-    start_idx = text.find(issue_str)
-    sub_text = text[start_idx:start_idx+500]
+    # 3. 截取期号附近的内容 (前后 300 字符)
+    idx = clean_text.find(issue_str)
+    # 向后找
+    snippet = clean_text[idx:idx+400]
     
-    # 提取所有两位数字
-    nums = re.findall(r'\b([0-3][0-9])\b', sub_text)
+    # 4. 提取所有数字
+    # 匹配 1-33 的数字 (允许一位数或两位数)
+    nums = re.findall(r'\b([0-3]?[0-9])\b', snippet)
+    nums = [int(n) for n in nums]
     
-    # 清洗：转为int
-    valid_nums = [int(n) for n in nums]
-    
-    # 过滤：红球 <=33, 蓝球 <=16
-    # 既然是双色球，我们寻找连续的7个符合规则的数字
-    # 通常前6个红，后1个蓝。
-    
-    for i in range(len(valid_nums) - 6):
-        chunk = valid_nums[i : i+7]
-        # 简单校验：前6个互不相同且<=33
+    # 5. 寻找符合双色球规则的序列 (6红 + 1蓝)
+    # 红球 1-33, 蓝球 1-16
+    for i in range(len(nums) - 7):
+        chunk = nums[i : i+7]
+        # 规则：前6个是红球(互不相同, 1-33)，第7个是蓝球(1-16)
+        # 且数字之间不能全是0
         reds = chunk[:6]
         blue = chunk[6]
         
-        if len(set(reds)) == 6 and all(1 <= r <= 33 for r in reds) and 1 <= blue <= 16:
-            # 找到了一组非常像双色球的数据
+        if (len(set(reds)) == 6 and 
+            all(1 <= r <= 33 for r in reds) and 
+            1 <= blue <= 16):
             return chunk
             
     return None
 
-def fetch_so_search(target_issue):
+def fetch_bing_search(target_issue):
     """
-    源1: 360搜索 (so.com)
-    360的网页结构比较简单，适合爬虫
+    源1: 必应搜索 (Bing)
+    Github Actions 是微软家的，访问 Bing 通常不会被墙，也不会有验证码。
     """
-    url = f"https://www.so.com/s?q=双色球{target_issue}"
-    print(f"🔍 [搜索引擎] 正在搜索 360: {url}")
+    url = f"https://www.bing.com/search?q=双色球+{target_issue}+开奖结果"
+    print(f"🔍 正在请求 Bing: {url}")
     try:
         r = requests.get(url, headers=get_headers(), timeout=10)
-        r.encoding = 'utf-8'
-        
-        nums = extract_numbers_from_text(r.text, target_issue)
+        nums = extract_from_text(r.text, target_issue)
         if nums:
-            print(f"✅ 360搜索找到数据: {nums}")
+            print(f"✅ Bing 找到数据: {nums}")
+            return nums
+        else:
+            print("⚠️ Bing 页面正常但未提取到号码 (可能结构变化)")
+            # 调试：打印一小段内容看是不是被拦截了
+            # print(r.text[:500]) 
+    except Exception as e:
+        print(f"❌ Bing 失败: {e}")
+    return None
+
+def fetch_sogou_search(target_issue):
+    """
+    源2: 搜狗搜索
+    搜狗的爬虫反制相对较弱，且收录微信公众号内容，更新快。
+    """
+    url = f"https://www.sogou.com/web?query=双色球{target_issue}期开奖结果"
+    print(f"🔍 正在请求 搜狗: {url}")
+    try:
+        # 搜狗需要 Cookie 才能减少验证码概率，这里尝试裸奔，但在 Header 加了 Language
+        r = requests.get(url, headers=get_headers(), timeout=10)
+        nums = extract_from_text(r.text, target_issue)
+        if nums:
+            print(f"✅ 搜狗 找到数据: {nums}")
             return nums
     except Exception as e:
-        print(f"❌ 360搜索失败: {e}")
+        print(f"❌ 搜狗 失败: {e}")
     return None
 
-def fetch_baidu_search(target_issue):
+def fetch_cwl_direct(target_issue):
     """
-    源2: 百度搜索 (baidu.com)
+    源3: 中国福彩官网 (API 直连)
     """
-    url = f"https://www.baidu.com/s?wd=双色球{target_issue}"
-    print(f"🔍 [搜索引擎] 正在搜索 百度: {url}")
+    url = "https://www.cwl.gov.cn/cwl_admin/kjxx/findDrawNotice?name=ssq&issueCount=1"
+    print(f"📡 正在请求 官网API...")
     try:
-        # 百度需要Cookie防止验证码，简单尝试无Cookie版
-        r = requests.get(url, headers=get_headers(), timeout=10)
-        r.encoding = 'utf-8'
-        
-        nums = extract_numbers_from_text(r.text, target_issue)
-        if nums:
-            print(f"✅ 百度搜索找到数据: {nums}")
-            return nums
-    except Exception as e:
-        print(f"❌ 百度搜索失败: {e}")
-    return None
-
-def fetch_bj_lottery(target_issue):
-    """
-    源3: 北京福彩官网 (地方站，直连，无CDN)
-    http://www.bwlc.net/
-    """
-    url = "http://www.bwlc.net/bulletin/prevssq.html"
-    print(f"🏢 [地方官网] 正在访问 北京福彩: {url}")
-    try:
-        r = requests.get(url, headers=get_headers(), timeout=15)
-        r.encoding = 'utf-8'
-        
-        # 这是一个列表页，寻找 target_issue
-        if str(target_issue) in r.text:
-            # 北京福彩表格结构：
-            # <tr class="bg_c"><td>2025141</td><td>2025-12-07</td><td>02</td><td>04</td>...
-            # 直接用正则提取行
-            row_pattern = re.compile(f"{target_issue}.*?</tr>", re.DOTALL)
-            match = row_pattern.search(r.text)
-            if match:
-                row_html = match.group(0)
-                # 提取数字
-                nums = re.findall(r'>(\d{2})<', row_html)
-                if len(nums) >= 7:
-                    # 北京官网红蓝球也是分开td的，提取到的前7个数字通常就是
-                    # 排除掉日期部分(如果有)
-                    valid = [int(n) for n in nums if int(n) <= 33]
-                    if len(valid) >= 7:
-                        # 取最后7个（假设蓝球在最后）
-                        final_nums = valid[-7:]
-                        print(f"✅ 北京福彩找到数据: {final_nums}")
-                        return final_nums
-    except Exception as e:
-        print(f"❌ 北京福彩失败: {e}")
-    return None
-
-def fetch_gx_lottery(target_issue):
-    """
-    源4: 广西福彩 (备用地方站)
-    """
-    url = "https://www.gxcaipiao.com.cn/notice/get_notice_list?game_code=100&page_index=1&page_size=10"
-    print(f"🏢 [地方官网] 正在访问 广西福彩API...")
-    try:
-        r = requests.get(url, headers=get_headers(), timeout=10)
+        # 官网对 Referer 校验严格
+        h = get_headers()
+        h['Referer'] = 'http://www.cwl.gov.cn/'
+        r = requests.get(url, headers=h, timeout=10)
         data = r.json()
-        for item in data['data']:
-            if str(item['term']) == str(target_issue):
-                # 格式: 01,02,03,04,05,06+07
-                red_blue = item['open_number']
-                r_str, b_str = red_blue.split('+')
-                reds = [int(x) for x in r_str.split(',')]
-                blue = int(b_str)
-                res = reds + [blue]
-                print(f"✅ 广西福彩找到数据: {res}")
-                return res
+        if data['result']:
+            item = data['result'][0]
+            if str(item['code']) == str(target_issue):
+                reds = [int(x) for x in item['red'].split(',')]
+                blue = int(item['blue'])
+                print(f"✅ 官网API 找到数据: {reds} + {blue}")
+                return reds + [blue]
     except Exception as e:
-        print(f"❌ 广西福彩失败: {e}")
+        print(f"❌ 官网API 失败: {e}")
     return None
 
 def get_web_data(local_issue):
-    """
-    智能调度器: 预测下一期，然后全网搜索
-    """
     target_issue = local_issue + 1
-    print(f"🎯 目标期号: {target_issue} (脚本将全网搜索此号码)")
+    print(f"🎯 目标期号: {target_issue} (脚本将在全网搜寻此数据)")
     
-    # 搜索源列表
-    searchers = [fetch_bj_lottery, fetch_gx_lottery, fetch_so_search, fetch_baidu_search]
+    # 0. 核按钮检查
+    if USE_MANUAL and MANUAL_ISSUE == target_issue:
+        print(f"☢️ 检测到手动核按钮开启，强制使用预设数据！")
+        row = [MANUAL_ISSUE] + MANUAL_NUMS
+        return pd.DataFrame([row], columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
+
+    # 1. 必应 (最推荐 GHA 环境)
+    nums = fetch_bing_search(target_issue)
+    if nums: return to_df(target_issue, nums)
     
-    for searcher in searchers:
-        nums = searcher(target_issue)
-        if nums:
-            # 组装 DataFrame
-            row = [target_issue] + nums
-            df = pd.DataFrame([row], columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
-            return df
-            
-    print(f"⚠️ 搜索完成，未找到第 {target_issue} 期数据。")
+    # 2. 官网 API
+    nums = fetch_cwl_direct(target_issue)
+    if nums: return to_df(target_issue, nums)
+
+    # 3. 搜狗
+    nums = fetch_sogou_search(target_issue)
+    if nums: return to_df(target_issue, nums)
+    
+    print(f"⚠️ 全网搜索未果。Bing/搜狗/官网 均未返回第 {target_issue} 期数据。")
     return None
+
+def to_df(issue, nums):
+    # nums 应该是 [r1, r2, r3, r4, r5, r6, b]
+    row = [issue] + nums
+    return pd.DataFrame([row], columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
 
 def update_database():
     df_local = pd.DataFrame()
-    last_issue = 2025000 
+    last_issue = 2025000
     
     if os.path.exists(CSV_FILE):
         try: 
@@ -205,20 +184,21 @@ def update_database():
     
     print(f"📂 本地最新: {last_issue}")
     
-    # 执行搜索
+    # 这里的 last_issue 必须是本地的，用于预测下一期
     df_net = get_web_data(last_issue)
     
     if df_net is not None and not df_net.empty:
-        print(f"🎉 抓取成功! 更新本地数据库...")
-        if not df_local.empty:
-            df_local.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
-            df_final = pd.concat([df_local, df_net]).drop_duplicates(subset=['Issue'], keep='last')
-        else:
-            df_final = df_net
-        
-        df_final = df_final.sort_values(by='Issue')
-        df_final.to_csv(CSV_FILE, index=False, encoding='utf-8')
-        return df_final
+        net_issue = int(df_net.iloc[0]['Issue'])
+        if net_issue > last_issue:
+            print(f"🎉 抓取成功! 更新本地数据库: {last_issue} -> {net_issue}")
+            if not df_local.empty:
+                df_local.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
+                df_final = pd.concat([df_local, df_net]).drop_duplicates(subset=['Issue'], keep='last')
+            else:
+                df_final = df_net
+            df_final = df_final.sort_values(by='Issue')
+            df_final.to_csv(CSV_FILE, index=False, encoding='utf-8')
+            return df_final
     
     return df_local
 
@@ -332,7 +312,7 @@ def run_analysis_raw(df):
             pd.DataFrame(bg).sort_values('率', ascending=False))
 
 def main():
-    print("🚀 启动 (v7.0 搜索引擎暴力版)...")
+    print("🚀 启动 (v8.0 Bing/Sogou 越狱版)...")
     
     # 1. 更新数据库
     df = update_database()
@@ -341,15 +321,16 @@ def main():
     last_row = df.iloc[-1]
     new_issue = int(last_row['Issue'])
     
-    # 2. 判断状态 (再次读取本地确认更新)
+    # 2. 判断状态
+    # 读取原始 CSV 再次确认，防止内存缓存问题
     try:
-        df_check = pd.read_csv(CSV_FILE)
-        current_csv_issue = int(df_check['Issue'].iloc[-1])
-        is_updated = current_csv_issue >= 2025141 # 只有真的拿到141才算更新
+        csv_check = pd.read_csv(CSV_FILE)
+        csv_issue = int(csv_check['Issue'].iloc[-1])
+        is_updated = (csv_issue >= 2025141) # 硬编码判断，只有拿到141才算成功
     except:
         is_updated = False
     
-    print(f"最终显示期号: {new_issue} | 更新状态: {is_updated}")
+    print(f"最终判定: 期号 {new_issue} | 是否更新: {is_updated}")
 
     # 3. 分析
     rs, rg, bs, bg = run_analysis_raw(df)
@@ -362,10 +343,10 @@ def main():
     
     if is_updated:
         title = f"✅ 双色球第{new_issue}期 (已更新)"
-        msg_header = f"<p style='color:green;text-align:center;font-weight:bold;'>✅ 已成功通过搜索引擎抓取最新数据！</p>"
+        msg_header = f"<p style='color:green;text-align:center;font-weight:bold;'>✅ Bing/搜狗 搜索成功！<br>已获取最新数据。</p>"
     else:
         title = f"❌ 双色球第{new_issue}期 (未更新)"
-        msg_header = f"<p style='color:red;text-align:center;font-weight:bold;'>❌ 搜索未果，仍显示旧数据。<br>搜索引擎可能尚未收录。</p>"
+        msg_header = f"<p style='color:red;text-align:center;font-weight:bold;'>❌ 搜索未果，仍显示旧数据。<br>请稍后，或启用代码中的 USE_MANUAL 核按钮。</p>"
     
     msg = f"{format_balls_html(last_row)}" + msg_header
     msg += f"<div style='text-align:center;margin:10px'><a href='{url}' style='color:#007bff;text-decoration:none;'>📊 打开交互图表控制台</a></div>"
