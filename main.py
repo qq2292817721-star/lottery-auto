@@ -26,7 +26,31 @@ BLUE_GROUPS = {
 }
 # ========================================
 
-# --- 1. 多源数据获取模块 (核心升级) ---
+# --- 1. 多源数据获取模块 (修复版) ---
+
+def clean_data(df):
+    """关键修复：清洗数据，确保全是数字"""
+    try:
+        # 1. 确保只有8列
+        df = df.iloc[:, :8]
+        df.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
+        
+        # 2. 强制将 'Issue' 列转为数字，无法转换的变 NaN (比如 '双色球: 开奖信息' 这种行)
+        df['Issue'] = pd.to_numeric(df['Issue'], errors='coerce')
+        
+        # 3. 删除任何包含 NaN 的行
+        df = df.dropna()
+        
+        # 4. 再次确保所有列都是数字
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+        df = df.dropna() # 再次清理
+        
+        return df.sort_values(by='Issue').astype(int)
+    except Exception as e:
+        print(f"Data cleaning failed: {e}")
+        return None
 
 def fetch_500_com():
     """数据源1: 500彩票网"""
@@ -35,73 +59,59 @@ def fetch_500_com():
     try:
         r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         r.encoding = 'utf-8'
-        df = pd.read_html(StringIO(r.text))[0]
-        # 500网通常前8列是: 期号, R1...R6, Blue
-        df = df.iloc[:, :8]
-        df.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
-        return df
+        # read_html 返回列表，通常第一个表是数据，但也可能混入杂质
+        dfs = pd.read_html(StringIO(r.text))
+        for df in dfs:
+            # 简单判断：列数足够且包含数据的表
+            if df.shape[1] >= 8 and df.shape[0] > 5:
+                # 尝试清洗
+                clean_df = clean_data(df)
+                if clean_df is not None and not clean_df.empty:
+                    return clean_df
+        return None
     except Exception as e:
         print(f"Source 1 failed: {e}")
         return None
 
 def fetch_sina():
-    """数据源2: 新浪彩票 (备用)"""
+    """数据源2: 新浪彩票"""
     print("Trying Source 2 (Sina)...")
     url = "http://lottery.sina.com.cn/history/ssq/index.shtml?args=50"
     try:
         r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        r.encoding = 'utf-8' # 新浪可能是utf-8或gbk
-        # 新浪的表格比较复杂，需要精确定位
+        r.encoding = 'utf-8' 
         dfs = pd.read_html(StringIO(r.text))
-        # 通常是数据量最大的那个表
         target_df = None
         for df in dfs:
             if df.shape[0] > 10 and df.shape[1] > 7:
-                target_df = df
-                break
+                target_df = df; break
         
         if target_df is None: return None
         
-        # 新浪列名通常包含：期号, 红1, 红2... 蓝
-        # 简单处理：只取前几列，并重命名
-        # 注意：新浪有时有"年份"列，需要判断
-        # 假设我们取包含"期号"的列作为起始
-        
-        # 简化策略：只保留数值类型的列，并且数量符合预期的
-        # 这里做一种通用清洗
+        # 手动解析新浪复杂表格
         clean_rows = []
         for _, row in target_df.iterrows():
-            # 转为字符串列表
             vals = [str(v).strip() for v in row.values]
-            # 过滤掉非数字行
             nums = [v for v in vals if v.isdigit()]
-            # 双色球数据行至少要有: 期号(1)+红(6)+蓝(1) = 8个数字
             if len(nums) >= 8:
-                # 假设第一个长数字是期号 (2025141)
                 issue = nums[0]
-                if len(issue) == 7: # 2025xxx
-                    # 取紧接在期号后面的7个数字 (6红1蓝)
-                    # 新浪格式通常是: 期号, 红1..红6, 蓝
+                if len(issue) == 7 and issue.startswith('20'): # 简单校验期号
                     idx = vals.index(issue)
-                    # 尝试提取后续数据，需跳过空值
                     data_part = []
                     for k in range(idx+1, len(vals)):
-                        if vals[k].isdigit():
-                            data_part.append(int(vals[k]))
+                        if vals[k].isdigit(): data_part.append(int(vals[k]))
                         if len(data_part) == 7: break
-                    
                     if len(data_part) == 7:
                         clean_rows.append([int(issue)] + data_part)
         
         if not clean_rows: return None
-        df_new = pd.DataFrame(clean_rows, columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
-        return df_new
+        return pd.DataFrame(clean_rows, columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
     except Exception as e:
         print(f"Source 2 failed: {e}")
         return None
 
 def fetch_163():
-    """数据源3: 网易彩票 (兜底)"""
+    """数据源3: 网易彩票"""
     print("Trying Source 3 (163.com)...")
     url = "https://caipiao.163.com/award/ssq/"
     try:
@@ -109,21 +119,15 @@ def fetch_163():
         r.encoding = 'utf-8'
         dfs = pd.read_html(StringIO(r.text))
         for df in dfs:
-            # 网易的表头通常有 "期号"
             s_df = df.astype(str)
             if s_df.apply(lambda x: x.str.contains('期号')).any().any():
-                # 清洗网易数据
-                clean_data = []
+                clean_data_list = []
                 for _, row in df.iterrows():
                     vals = [str(v).strip() for v in row.values if str(v).strip().isdigit()]
-                    # 网易可能把红球放在一个单元格，或者分开
-                    # 这里做简单容错，寻找符合 2025xxx 的期号
-                    if len(vals) >= 8: # 至少8个数字
-                        if len(vals[0]) == 7: # 期号
-                            clean_data.append([int(x) for x in vals[:8]])
-                
-                if clean_data:
-                    return pd.DataFrame(clean_data, columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
+                    if len(vals) >= 8 and len(vals[0]) == 7:
+                        clean_data_list.append([int(x) for x in vals[:8]])
+                if clean_data_list:
+                    return pd.DataFrame(clean_data_list, columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
         return None
     except Exception as e:
         print(f"Source 3 failed: {e}")
@@ -131,43 +135,26 @@ def fetch_163():
 
 def get_web_data():
     """多源聚合获取逻辑"""
-    # 1. 尝试 500.com
-    df = fetch_500_com()
-    if df is not None and not df.empty:
-        print("✅ Fetched from 500.com")
-        return df.sort_values(by='Issue').astype(int)
-    
-    # 2. 尝试 Sina
-    df = fetch_sina()
-    if df is not None and not df.empty:
-        print("✅ Fetched from Sina")
-        return df.sort_values(by='Issue').astype(int)
-        
-    # 3. 尝试 163
-    df = fetch_163()
-    if df is not None and not df.empty:
-        print("✅ Fetched from 163")
-        return df.sort_values(by='Issue').astype(int)
-        
+    for fetcher in [fetch_500_com, fetch_sina, fetch_163]:
+        df = fetcher()
+        if df is not None and not df.empty:
+            print(f"✅ Data fetched successfully.")
+            return df
     print("❌ All sources failed.")
     return None
 
 def update_database():
-    """更新逻辑：智能合并"""
+    """更新逻辑"""
     df_local = pd.DataFrame()
-    # 读取本地
     if os.path.exists(CSV_FILE):
-        try:
-            df_local = pd.read_csv(CSV_FILE)
+        try: df_local = pd.read_csv(CSV_FILE)
         except: pass
     
-    # 获取网络数据
     df_net = get_web_data()
     
     if df_net is not None:
         if not df_local.empty:
             df_local.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
-            # 合并：用网络数据覆盖或追加本地数据
             df_final = pd.concat([df_local, df_net]).drop_duplicates(subset=['Issue'], keep='last')
         else:
             df_final = df_net
@@ -179,7 +166,7 @@ def update_database():
         print("⚠️ 无法连接网络，使用本地数据。")
         return df_local
 
-# --- 2. 算法工具 (保持不变) ---
+# --- 2. 算法工具 ---
 def calc_slope(series, window=5):
     y = series.tail(window)
     if len(y) < 2: return 0
@@ -292,31 +279,26 @@ def run_analysis_raw(df):
             pd.DataFrame(bg).sort_values('率', ascending=False))
 
 def main():
-    print("🚀 启动 (多源版)...")
+    print("🚀 启动 (多源版+清洗修复)...")
     
-    # 1. 记录本地旧期号
     old_issue = 0
     if os.path.exists(CSV_FILE):
         try: old_issue = int(pd.read_csv(CSV_FILE)['Issue'].iloc[-1])
         except: pass
 
-    # 2. 尝试更新 (自动尝试3个源)
     df = update_database()
     if df is None or df.empty: return
     
-    # 3. 获取最新状态
     last_row = df.iloc[-1]
     new_issue = int(last_row['Issue'])
     is_new = new_issue > old_issue
     
-    print(f"本地: {old_issue} | 线上(抓取后): {new_issue} | 状态: {'🆕 已更新' if is_new else '🔁 未更新'}")
+    print(f"本地: {old_issue} | 线上: {new_issue} | 状态: {'🆕 已更新' if is_new else '🔁 未更新'}")
 
-    # 4. 分析
     rs, rg, bs, bg = run_analysis_raw(df)
     ai_text = generate_raw_text(rs, rg, bs, bg)
     generate_interactive_page(df, new_issue, ai_text)
 
-    # 5. 推送
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     url = f"https://{repo.split('/')[0]}.github.io/{repo.split('/')[1]}/" if repo else "public/index.html"
     
@@ -324,12 +306,11 @@ def main():
     msg = f"{format_balls_html(last_row)}"
     
     if not is_new:
-        msg += "<p style='color:red;text-align:center;font-size:12px'>⚠️ 即使切换了数据源，仍未抓取到新数据。<br>可能全网数据尚未同步，建议10分钟后再试。</p>"
+        msg += "<p style='color:red;text-align:center;font-size:12px'>⚠️ 数据未更新，显示旧数据。</p>"
     else:
-        msg += "<p style='color:green;text-align:center;font-size:12px'>✅ 成功抓取到最新一期数据！</p>"
+        msg += "<p style='color:green;text-align:center;font-size:12px'>✅ 成功抓取最新数据</p>"
     
     msg += f"<div style='text-align:center;margin:10px'><a href='{url}'>📊 打开交互图表控制台</a></div>"
-    
     msg += df_to_html_table(rs, "🔴 红球全量趋势 (S10降序)")
     msg += df_to_html_table(bs, "🔵 蓝球全量趋势")
     msg += df_to_html_table(rg, "🛡️ 红球分组")
