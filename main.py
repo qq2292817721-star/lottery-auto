@@ -4,20 +4,24 @@ import requests
 import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import xml.etree.ElementTree as ET
+import json
 import time
 import random
+from io import StringIO
+import re
 
 # ================= 配置区 =================
 PUSH_TOKEN = os.environ.get("PUSH_TOKEN") 
 CSV_FILE = "ssq.csv"
 
+# 红球分组
 RED_GROUPS = {
     'G01': [1, 19, 31], 'G02': [2, 21, 28], 'G03': [3, 22, 26],
     'G04': [4, 23, 24], 'G05': [5, 16, 30], 'G06': [6, 12, 33],
     'G07': [7, 15, 29], 'G08': [8, 18, 25], 'G09': [9, 10, 32],
     'G10': [11, 13, 27], 'G11': [14, 17, 20]
 }
+# 蓝球分组
 BLUE_GROUPS = {
     'G1(01+16)': [1, 16], 'G2(02+15)': [2, 15], 'G3(03+14)': [3, 14],
     'G4(04+13)': [4, 13], 'G5(05+12)': [5, 12], 'G6(06+11)': [6, 11],
@@ -25,100 +29,162 @@ BLUE_GROUPS = {
 }
 # ========================================
 
-# --- 1. 强力数据获取模块 (XML/API 版) ---
+# --- 1. 强力数据获取模块 (JSON API + 中彩网) ---
 
-def fetch_xml_500():
-    """源1：500彩票网官方XML接口 (最快、最稳)"""
-    # 加上时间戳防止缓存
-    t = int(time.time() * 1000)
-    url = f"http://kaijiang.500.com/static/info/kaijiang/xml/ssq/list.xml?_t={t}"
-    print(f"📡 正在连接源1 (XML接口)...")
-    
+def get_headers():
+    """伪装成真实浏览器"""
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Referer': 'http://www.zhcw.com/',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+    }
+
+def fetch_sina_api():
+    """源1：新浪彩票 JSON API (无缓存，秒级更新)"""
+    print("📡 正在连接源1 (新浪API)...")
+    # 这是一个隐藏的 App 接口，直接返回 JSON 数据，无需解析 HTML
+    url = "https://match.lottery.sina.com.cn/client/index/client_list?lotteryCode=ssq&page=1"
     try:
-        r = requests.get(url, timeout=10)
-        r.encoding = 'gb2312' # XML通常是gb2312
+        r = requests.get(url, headers=get_headers(), timeout=10)
+        data = r.json()
         
-        # 解析 XML
-        root = ET.fromstring(r.text)
-        data = []
-        
-        # 遍历 XML 节点
-        for row in root.findall('row'):
-            expect = row.get('expect') # 期号
-            opencode = row.get('opencode') # 号码 "01,02,03,04,05,06|07"
-            
-            if expect and opencode:
-                reds, blue = opencode.split('|')
-                r_list = [int(x) for x in reds.split(',')]
-                b_val = int(blue)
+        # 解析 JSON
+        results = []
+        if 'result' in data and 'data' in data['result']:
+            for item in data['result']['data']:
+                issue = item.get('issueNo') # 期号 2025141
+                draw_code = item.get('drawCode') # "02,04,05,10,12,13|06"
                 
-                # 构造一行数据
-                item = [int(expect)] + r_list + [b_val]
-                data.append(item)
+                if issue and draw_code:
+                    red_str, blue_str = draw_code.split('|')
+                    reds = [int(x) for x in red_str.split(',')]
+                    blue = int(blue_str)
+                    
+                    row = [int(issue)] + reds + [blue]
+                    results.append(row)
         
-        if data:
-            df = pd.DataFrame(data, columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
-            print(f"✅ 源1获取成功! 最新期号: {df['Issue'].max()}")
+        if results:
+            df = pd.DataFrame(results, columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
+            print(f"✅ 源1 (新浪API) 获取成功! 最新期号: {df['Issue'].max()}")
             return df
-            
     except Exception as e:
         print(f"❌ 源1失败: {e}")
     return None
 
-def fetch_html_500_bust_cache():
-    """源2：传统的500.com网页 (带缓存破坏参数)"""
-    t = int(time.time())
-    url = f"http://datachart.500.com/ssq/history/newinc/history.php?limit=50&sort=0&_random={t}"
-    print(f"📡 正在连接源2 (网页版)...")
-    
+def fetch_zhcw_html():
+    """源2：中彩网 (用户指定的网站)"""
+    print("📡 正在连接源2 (中彩网 zhcw.com)...")
+    url = "http://www.zhcw.com/ssq/kjgg/"
     try:
-        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        r = requests.get(url, headers=get_headers(), timeout=15)
         r.encoding = 'utf-8'
-        # 清洗数据
-        from io import StringIO
+        
+        # 中彩网的表格比较标准，直接寻找 tr
         dfs = pd.read_html(StringIO(r.text))
+        
         for df in dfs:
-            if df.shape[1] >= 8 and len(df) > 5:
-                # 简单的列名重置和清洗
-                df = df.iloc[:, :8]
-                df.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
-                # 强转数字，把非法行变成 NaN 并删除
-                for col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-                df = df.dropna().astype(int)
-                if not df.empty:
-                    print(f"✅ 源2获取成功! 最新期号: {df['Issue'].max()}")
-                    return df
+            # 中彩网的表通常有 "期号" "中奖号码" 等列
+            # 把它转为字符串方便搜索
+            s_df = df.astype(str)
+            if s_df.apply(lambda x: x.str.contains('期号')).any().any():
+                clean_data = []
+                for _, row in df.iterrows():
+                    # 提取该行的所有数字
+                    row_str = " ".join([str(v) for v in row.values])
+                    # 正则提取: 2025开头跟随3位数字的期号
+                    issue_match = re.search(r'(202[4-9]\d{3})', row_str)
+                    
+                    if issue_match:
+                        issue = int(issue_match.group(1))
+                        # 提取红蓝球：通常中彩网一行里会有多个数字，我们需要找到除了期号外的 7 个数字
+                        # 简单粗暴法：把行里所有数字拿出来
+                        nums = re.findall(r'\d+', row_str)
+                        nums = [int(n) for n in nums]
+                        
+                        # 过滤掉期号本身
+                        balls = [n for n in nums if n != issue and n <= 33]
+                        
+                        # 双色球至少要有7个球(6红1蓝)，有时会有无关数字，取前7个或特定逻辑
+                        # 中彩网表格比较干净，通常是 期号, 红1..红6, 蓝
+                        # 我们尝试从这一行提取 6个 1-33 的红球 和 1个 1-16 的蓝球
+                        
+                        # 更精准的方法：中彩网分开列显示
+                        # 让我们尝试直接清洗 df
+                        # 假设我们只取前8列有效数字
+                        real_balls = []
+                        for val in row.values:
+                            s_val = str(val).strip()
+                            if s_val.isdigit():
+                                real_balls.append(int(s_val))
+                        
+                        # 如果这一行解析出来的数字 >= 8 (1期号 + 6红 + 1蓝)
+                        if len(real_balls) >= 8:
+                            # 校验期号
+                            if real_balls[0] > 2020000:
+                                clean_data.append(real_balls[:8])
+
+                if clean_data:
+                    new_df = pd.DataFrame(clean_data, columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
+                    print(f"✅ 源2 (中彩网) 获取成功! 最新期号: {new_df['Issue'].max()}")
+                    return new_df
+
     except Exception as e:
         print(f"❌ 源2失败: {e}")
     return None
 
+def fetch_500_xml():
+    """源3：500网 XML (兜底)"""
+    print("📡 正在连接源3 (500 XML)...")
+    import xml.etree.ElementTree as ET
+    try:
+        t = int(time.time()*1000)
+        url = f"http://kaijiang.500.com/static/info/kaijiang/xml/ssq/list.xml?_t={t}"
+        r = requests.get(url, headers=get_headers(), timeout=10)
+        r.encoding = 'gb2312'
+        root = ET.fromstring(r.text)
+        data = []
+        for row in root.findall('row'):
+            expect = row.get('expect')
+            opencode = row.get('opencode')
+            if expect and opencode:
+                reds, blue = opencode.split('|')
+                item = [int(expect)] + [int(x) for x in reds.split(',')] + [int(blue)]
+                data.append(item)
+        if data:
+            return pd.DataFrame(data, columns=['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue'])
+    except: pass
+    return None
+
 def get_web_data():
-    """多源聚合获取"""
-    # 优先尝试 XML，因为它几乎不会出错
-    df = fetch_xml_500()
+    """多源聚合 - 优先级：新浪API > 中彩网 > 500 XML"""
+    
+    # 1. 新浪 API (目前最稳)
+    df = fetch_sina_api()
     if df is not None: return df.sort_values(by='Issue')
     
-    # 其次尝试网页爬虫
-    df = fetch_html_500_bust_cache()
+    # 2. 中彩网 (你看到的那个网站)
+    df = fetch_zhcw_html()
+    if df is not None: return df.sort_values(by='Issue')
+    
+    # 3. 500 XML
+    df = fetch_500_xml()
     if df is not None: return df.sort_values(by='Issue')
     
     return None
 
 def update_database():
-    """数据库更新逻辑"""
     df_local = pd.DataFrame()
     if os.path.exists(CSV_FILE):
         try: df_local = pd.read_csv(CSV_FILE)
         except: pass
     
-    # 联网获取
     df_net = get_web_data()
     
     if df_net is not None and not df_net.empty:
         if not df_local.empty:
             df_local.columns = ['Issue', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'Blue']
-            # 合并策略：用网络数据更新本地，以 Issue 为基准去重，保留网络端最新的数据
             df_final = pd.concat([df_local, df_net]).drop_duplicates(subset=['Issue'], keep='last')
         else:
             df_final = df_net
@@ -127,10 +193,10 @@ def update_database():
         df_final.to_csv(CSV_FILE, index=False, encoding='utf-8')
         return df_final
     
-    print("⚠️ 所有网络源均失败，使用本地数据。")
+    print("⚠️ 严重警告：所有数据源均无法连接，请检查网络或Github Actions IP是否被封禁。")
     return df_local
 
-# --- 2. 核心算法 (保持稳定) ---
+# --- 2. 算法与绘图 (保持不变) ---
 def calc_slope(series, window=5):
     y = series.tail(window)
     if len(y) < 2: return 0
@@ -147,7 +213,6 @@ def get_energy(df, targets, type='red'):
         scores.append(curr)
     return pd.Series(scores)
 
-# --- 3. 绘图模块 ---
 def calculate_kline_for_chart(df, target_ball, ball_type, period):
     scores = get_energy(df, [target_ball], ball_type).tolist()
     ohlc = []
@@ -196,7 +261,6 @@ def generate_interactive_page(df, last_issue, ai_text):
     var a=new Array(196).fill(false);a[b]=a[b+1]=a[b+2]=a[b+3]=true;Plotly.restyle(d,{{'visible':a}})}}</script></body></html>"""
     with open("public/index.html", "w", encoding='utf-8') as f: f.write(html)
 
-# --- 4. 辅助函数 ---
 def generate_raw_text(rs, rg, bs, bg):
     return f"【数据集】\n红球:\n{rs.to_string(index=False)}\n\n蓝球:\n{bs.to_string(index=False)}\n\n红组:\n{rg.to_string(index=False)}\n\n蓝组:\n{bg.to_string(index=False)}"
 
@@ -242,19 +306,17 @@ def run_analysis_raw(df):
             pd.DataFrame(bg).sort_values('率', ascending=False))
 
 def main():
-    print("🚀 启动 (v3.0 强力API版)...")
+    print("🚀 启动 (v4.0 终极API版)...")
     
-    # 获取本地旧期号
     old_issue = 0
     if os.path.exists(CSV_FILE):
         try: old_issue = int(pd.read_csv(CSV_FILE)['Issue'].iloc[-1])
         except: pass
 
-    # 更新数据
+    # 数据更新
     df = update_database()
     if df is None or df.empty: return
     
-    # 状态判断
     last_row = df.iloc[-1]
     new_issue = int(last_row['Issue'])
     is_new = new_issue > old_issue
@@ -270,15 +332,18 @@ def main():
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     url = f"https://{repo.split('/')[0]}.github.io/{repo.split('/')[1]}/" if repo else "public/index.html"
     
-    title = f"{'✅' if is_new else '⚠️'} 双色球第{new_issue}期"
+    # 动态标题
+    status_emoji = "✅" if is_new else "⚠️"
+    title = f"{status_emoji} 双色球第{new_issue}期"
+    
     msg = f"{format_balls_html(last_row)}"
     
     if is_new:
-        msg += "<p style='color:green;text-align:center;font-size:12px'>✅ 已通过官方XML接口获取最新数据</p>"
+        msg += f"<p style='color:green;text-align:center;font-size:12px;margin:5px 0;'>✅ 已获取到最新第 {new_issue} 期数据！</p>"
     else:
-        msg += f"<p style='color:red;text-align:center;font-size:12px'>⚠️ 数据仍为 {new_issue} 期。可能全网数据源尚未更新。</p>"
+        msg += f"<p style='color:red;text-align:center;font-size:12px;margin:5px 0;'>⚠️ 警告：全网数据源尚未同步，仍显示旧数据。</p>"
     
-    msg += f"<div style='text-align:center;margin:10px'><a href='{url}'>📊 打开交互图表控制台</a></div>"
+    msg += f"<div style='text-align:center;margin:10px'><a href='{url}' style='color:#007bff;text-decoration:none;'>📊 打开交互图表控制台</a></div>"
     msg += df_to_html_table(rs, "🔴 红球全量趋势 (S10降序)")
     msg += df_to_html_table(bs, "🔵 蓝球全量趋势")
     msg += df_to_html_table(rg, "🛡️ 红球分组")
