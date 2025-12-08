@@ -29,7 +29,7 @@ BLUE_GROUPS = {
 def get_headers():
     return {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
 
-# --- 1. 数据获取 ---
+# --- 1. 数据获取模块 ---
 def get_manual_data():
     if MANUAL_ISSUE_ENV and MANUAL_RED_ENV and MANUAL_BLUE_ENV:
         try:
@@ -79,30 +79,24 @@ def update_database():
             return df_final
     return df_local
 
-# --- 2. 核心算法 (校准版) ---
+# --- 2. 核心算法 (完全复刻本地脚本) ---
 
 def get_kline_dataframe(scores, period):
     """
-    【核心修复】尾部对齐算法
-    确保无论历史数据多长，最新的数据总是恰好落在最后一个完整周期里。
+    【回滚】恢复标准 0 索引切分
+    严格对齐本地脚本 `for i in range(0, len(scores), period)`
     """
-    # 1. 计算偏移量，切掉头部多余的数据
-    offset = len(scores) % period
-    aligned_scores = scores[offset:]
-    
     ohlc = []
-    for i in range(0, len(aligned_scores), period):
-        chunk = aligned_scores[i : i+period]
+    for i in range(0, len(scores), period):
+        chunk = scores[i : i+period]
         if not chunk: continue
-        # prev 取的是上一期的收盘价。如果是第一组，取列表前一个值(被切掉的那个)或者0
-        prev = aligned_scores[i-1] if i > 0 else (scores[offset-1] if offset>0 else 0)
-        
+        prev = scores[i-1] if i > 0 else 0
         chunk_max = max(chunk)
         chunk_min = min(chunk)
+        # 本地脚本逻辑：real_high = max(prev, chunk_max)
         real_high = max(prev, chunk_max)
         real_low = min(prev, chunk_min)
         ohlc.append([prev, real_high, real_low, chunk[-1]])
-        
     return pd.DataFrame(ohlc, columns=['Open', 'High', 'Low', 'Close'])
 
 def analyze_trend_from_kline(df_kline, ma_window):
@@ -112,8 +106,8 @@ def analyze_trend_from_kline(df_kline, ma_window):
     current_ma = df_kline['MA'].iloc[-1]
     
     recent = df_kline['Close'].tail(5)
-    # 使用 tail(5) 进行拟合，和本地脚本保持一致
-    slope = np.polyfit(np.arange(len(recent)), recent, 1)[0] * 10
+    x = np.arange(len(recent))
+    slope = np.polyfit(x, recent, 1)[0] * 10
     
     return slope, current_close > current_ma
 
@@ -121,12 +115,10 @@ def analyze_trend_from_kline(df_kline, ma_window):
 def analyze_red_single(df):
     results = []
     cols = ['R1','R2','R3','R4','R5','R6']
-    
-    # 强制转换数据类型，防止读取偏差
     for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce')
     
     for ball in range(1, 34):
-        # 严格复刻本地计算逻辑
+        # 能量计算 (复刻 ssq_dual_scan.py)
         prob_hit = 6/33; prob_miss = 27/33
         is_hit = df[cols].isin([ball]).any(axis=1)
         scores = []; curr = 0
@@ -135,43 +127,47 @@ def analyze_red_single(df):
             else: curr -= prob_hit
             scores.append(curr)
         
-        # 使用对齐后的 K 线计算
+        # K线与斜率
         df_10 = get_kline_dataframe(scores, 10)
         s10, ma5 = analyze_trend_from_kline(df_10, 5)
-        
         df_3 = get_kline_dataframe(scores, 3)
         s3, ma10 = analyze_trend_from_kline(df_3, 10)
         
-        # 诊断逻辑
-        tag = "☠️双杀下跌 (杀)"; prio = 0
+        # 诊断
+        tag = "☠️双杀下跌"; prio = 0
         if ma5:
             if ma10:
-                if s3 > 0: tag = "🔥共振加速 (必追)"; prio = 5
-                else: tag = "⚠️上涨中继 (防)"; prio = 4
+                if s3 > 0: tag = "🔥共振加速"; prio = 5
+                else: tag = "⚠️上涨中继"; prio = 4
             else:
-                if s3 < 0: tag = "💰黄金回踩 (重仓)"; prio = 4.5
-                else: tag = "🤔震荡整理 (观)"; prio = 3
+                if s3 < 0: tag = "💰黄金回踩"; prio = 4.5
+                else: tag = "🤔震荡整理"; prio = 3
         else:
-            if ma10 and s3 > 2: tag = "✨妖股反转 (博胆)"; prio = 3.5
-            elif ma10: tag = "🚀超跌反弹 (拖)"; prio = 2
-            else: tag = "☠️双杀下跌 (杀)"; prio = 0
+            if ma10 and s3 > 2: tag = "✨妖股反转"; prio = 3.5
+            elif ma10: tag = "🚀超跌反弹"; prio = 2
+            else: tag = "☠️双杀下跌"; prio = 0
             
+        # 注意：这里不需要返回 energy，因为 ssq_dual_scan.py 截图里没有
         results.append({'ball': ball, 's10': s10, 'ma5': ma5, 's3': s3, 'ma10': ma10, 'tag': tag, 'prio': prio})
     
     results.sort(key=lambda x: (x['prio'], x['s3']), reverse=True)
     return results
 
-# B. 红球分组
+# B. 红球分组 (增加 Energy)
 def analyze_red_groups(df):
     results = []
     cols = ['R1','R2','R3','R4','R5','R6']
     for name, balls in RED_GROUPS.items():
+        # 复刻 ssq_red_groups.py 能量逻辑
         scores = []; curr = 0
         for i in range(len(df)):
             hits = len(set(balls) & set(df.iloc[i][cols]))
             if hits > 0: curr += (hits * 5) - 3
             else: curr -= 1
             scores.append(curr)
+        
+        # 提取 Energy (最后累积值)
+        energy_val = scores[-1]
         
         recent = scores[-20:]
         slope = np.polyfit(np.arange(len(recent)), recent, 1)[0] * 10 if len(recent)>1 else 0
@@ -186,20 +182,25 @@ def analyze_red_groups(df):
         else:
             if slope > 0.5: tag = "🚀底部复苏"; prio = 4.5
             else: tag = "☠️弱势群体"; prio = 0
-        results.append({'name': name, 'balls': str(balls), 's': slope, 'tag': tag, 'prio': prio})
+            
+        results.append({'name': name, 'balls': str(balls), 's': slope, 'val': energy_val, 'tag': tag, 'prio': prio})
+    
     results.sort(key=lambda x: (x['prio'], x['s']), reverse=True)
     return results
 
-# C. 蓝球单兵
+# C. 蓝球单兵 (增加 Energy)
 def analyze_blue_single(df):
     results = []
     for ball in range(1, 17):
+        # 复刻 ssq_blue_scan.py 能量逻辑
         is_hit = (df['Blue'] == ball)
         scores = []; curr = 0
         for hit in is_hit:
-            if hit: curr += 15/16 * 5
-            else: curr -= 1/16
+            if hit: curr += 15/16 * 5 # prob_miss * 5
+            else: curr -= 1/16       # prob_hit
             scores.append(curr)
+            
+        energy_val = scores[-1]
         
         df_10 = get_kline_dataframe(scores, 10)
         s10, ma5 = analyze_trend_from_kline(df_10, 5)
@@ -213,20 +214,24 @@ def analyze_blue_single(df):
         else:
             if ma10: tag = "🚀妖股启动"; prio = 4.5
             else: tag = "☠️极寒深渊"; prio = 0
-        results.append({'ball': ball, 's': s3, 'tag': tag, 'prio': prio})
+            
+        results.append({'ball': ball, 's': s3, 'val': energy_val, 'tag': tag, 'prio': prio})
     results.sort(key=lambda x: (x['prio'], x['s']), reverse=True)
     return results
 
-# D. 蓝球分组
+# D. 蓝球分组 (增加 Energy)
 def analyze_blue_groups(df):
     results = []
     for name, balls in BLUE_GROUPS.items():
+        # 复刻 ssq_blue_groups.py 能量逻辑
         is_hit = df['Blue'].isin(balls)
         scores = []; curr = 0
         for hit in is_hit:
             if hit: curr += 7/8 * 2
             else: curr -= 1/8
             scores.append(curr)
+            
+        energy_val = scores[-1]
         
         recent = scores[-20:]
         slope = np.polyfit(np.arange(len(recent)), recent, 1)[0] * 10 if len(recent)>1 else 0
@@ -240,11 +245,12 @@ def analyze_blue_groups(df):
         else:
             if slope > 0: tag = "🚀底部启动"; prio = 4
             else: tag = "☠️下跌通道"; prio = 0
-        results.append({'name': name, 'balls': str(balls), 's': slope, 'tag': tag, 'prio': prio})
+            
+        results.append({'name': name, 'balls': str(balls), 's': slope, 'val': energy_val, 'tag': tag, 'prio': prio})
     results.sort(key=lambda x: (x['prio'], x['s']), reverse=True)
     return results
 
-# --- 3. 生成全景 HTML (极速版) ---
+# --- 3. 生成全景 HTML (增加能量列) ---
 
 def build_compressed_report(issue, last_row, r_s, r_g, b_s, b_g):
     st_t = "width:100%;font-size:11px;text-align:center;border-collapse:collapse;"
@@ -255,59 +261,59 @@ def build_compressed_report(issue, last_row, r_s, r_g, b_s, b_g):
     b_ball = f"<b style='color:#2196f3;margin:1px'>{last_row['Blue']:02d}</b>"
     
     html = f"<html><body style='font-family:sans-serif;padding:5px;background:#f9f9f9'>"
-    html += f"<div style='background:#fff;padding:10px;border-radius:6px;text-align:center'><h4>第{issue}期 (v17.0校准)</h4>{r_balls} + {b_ball}</div>"
+    html += f"<div style='background:#fff;padding:10px;border-radius:6px;text-align:center'><h4>第{issue}期 (v18.0)</h4>{r_balls} + {b_ball}</div>"
     
-    # 红球表
+    # 1. 红球单兵 (保持不变)
     html += "<div style='background:#fff;padding:8px;margin-top:10px;border-radius:6px'><h4 style='margin:0 0 5px 0;color:#d32f2f'>🔴红球单兵</h4>"
     html += f"<table style='{st_t}'><tr><th>号</th><th>S10</th><th>M5</th><th>S3</th><th>M10</th><th>态</th></tr>"
     for row in r_s:
         c = "#ffebee" if "🔥" in row['tag'] else ("#fffde7" if "💰" in row['tag'] else ("#f5f5f5" if "☠️" in row['tag'] else "#fff"))
         m5 = "√" if row['ma5'] else "×"; m10 = "√" if row['ma10'] else "×"
-        tag = row['tag'].split(' ')[0] # 简化标签
+        tag = row['tag'].split(' ')[0]
         html += f"<tr style='background:{c};'><td><b>{row['ball']:02d}</b></td><td>{row['s10']:.2f}</td><td>{m5}</td><td>{row['s3']:.2f}</td><td>{m10}</td><td>{tag}</td></tr>"
     html += "</table></div>"
     
-    # 分组表
+    # 2. 红球分组 (增加 能量 列)
     html += "<div style='background:#fff;padding:8px;margin-top:10px;border-radius:6px'><h4 style='margin:0 0 5px 0;color:#f57c00'>🛡️红球分组</h4>"
-    html += f"<table style='{st_t}'><tr><th>组</th><th>斜</th><th>态</th><th>号</th></tr>"
+    html += f"<table style='{st_t}'><tr><th>组</th><th>斜率</th><th>能量</th><th>态</th><th>号</th></tr>"
     for g in r_g:
         tag = g['tag'].split(' ')[0]
-        html += f"<tr><td>{g['name']}</td><td>{g['s']:.2f}</td><td>{tag}</td><td style='font-size:10px'>{g['balls']}</td></tr>"
+        html += f"<tr><td>{g['name']}</td><td>{g['s']:.2f}</td><td><b>{g['val']:.0f}</b></td><td>{tag}</td><td style='font-size:10px'>{g['balls']}</td></tr>"
     html += "</table></div>"
     
-    # 蓝球表
+    # 3. 蓝球单兵 (增加 能量 列)
     html += "<div style='background:#fff;padding:8px;margin-top:10px;border-radius:6px'><h4 style='margin:0 0 5px 0;color:#1976d2'>🔵蓝球单兵</h4>"
-    html += f"<table style='{st_t}'><tr><th>号</th><th>S3</th><th>态</th></tr>"
+    html += f"<table style='{st_t}'><tr><th>号</th><th>能量</th><th>斜率(S3)</th><th>态</th></tr>"
     for b in b_s:
         c = "#e3f2fd" if "🔥" in b['tag'] else "#fff"
         tag = b['tag'].split(' ')[0]
-        html += f"<tr style='background:{c};'><td><b>{b['ball']:02d}</b></td><td>{b['s']:.2f}</td><td>{tag}</td></tr>"
+        html += f"<tr style='background:{c};'><td><b>{b['ball']:02d}</b></td><td>{b['val']:.1f}</td><td>{b['s']:.2f}</td><td>{tag}</td></tr>"
     html += "</table></div>"
     
-    # 蓝球分组表
+    # 4. 蓝球分组 (增加 能量 列)
     html += "<div style='background:#fff;padding:8px;margin-top:10px;border-radius:6px'><h4 style='margin:0 0 5px 0;color:#303f9f'>👥蓝球分组</h4>"
-    html += f"<table style='{st_t}'><tr><th>组</th><th>斜</th><th>态</th><th>号</th></tr>"
+    html += f"<table style='{st_t}'><tr><th>组</th><th>斜率</th><th>能量</th><th>态</th><th>号</th></tr>"
     for g in b_g:
         tag = g['tag'].split(' ')[0]
-        html += f"<tr><td>{g['name']}</td><td>{g['s']:.2f}</td><td>{tag}</td><td style='font-size:10px'>{g['balls']}</td></tr>"
+        html += f"<tr><td>{g['name']}</td><td>{g['s']:.2f}</td><td><b>{g['val']:.1f}</b></td><td>{tag}</td><td style='font-size:10px'>{g['balls']}</td></tr>"
     html += "</table></div>"
     
-    # AI复制区
+    # AI复制区 (包含能量)
     ai = generate_ai_text(issue, r_s, r_g, b_s, b_g)
     html += f"<div style='margin-top:10px;border:1px dashed #666;padding:5px;background:#fff;'><h5 style='margin:0;text-align:center;'>🤖 AI数据包 (复制)</h5><textarea style='width:100%;height:60px;font-size:10px;border:none;'>{ai}</textarea></div></body></html>"
     return html
 
 def generate_ai_text(issue, r_s, r_g, b_s, b_g):
-    t = f"【第{issue}期校准数据】\n1.红球(号,S10,M5,S3,M10,态):\n"
+    t = f"【第{issue}期全量】\n1.红球(号,S10,M5,S3,M10,态):\n"
     for row in r_s:
         m5="1" if row['ma5'] else "0"; m10="1" if row['ma10'] else "0"
         t += f"{row['ball']},{row['s10']:.2f},{m5},{row['s3']:.2f},{m10},{row['tag']}|"
-    t += "\n2.红组:\n"
-    for g in r_g: t += f"{g['name']}(S:{g['s']:.2f}):{g['balls']}\n"
-    t += "\n3.蓝单:\n"
-    for b in b_s: t += f"{b['ball']}(S:{b['s']:.2f}):{b['tag']}\n"
-    t += "\n4.蓝组:\n"
-    for g in b_g: t += f"{g['name']}(S:{g['s']:.2f})\n"
+    t += "\n2.红组(组,斜,能,号):\n"
+    for g in r_g: t += f"{g['name']},{g['s']:.2f},{g['val']:.0f},{g['balls']}\n"
+    t += "\n3.蓝单(号,斜,能,态):\n"
+    for b in b_s: t += f"{b['ball']},{b['s']:.2f},{b['val']:.1f},{b['tag']}\n"
+    t += "\n4.蓝组(组,斜,能):\n"
+    for g in b_g: t += f"{g['name']},{g['s']:.2f},{g['val']:.1f}\n"
     return t
 
 def save_web_file(html_content, issue):
@@ -317,7 +323,7 @@ def save_web_file(html_content, issue):
 # --- 主程序 ---
 
 def main():
-    print("🚀 启动 v17.0 (像素级校准版)...")
+    print("🚀 启动 v18.0 (算法回滚+数据补全版)...")
     
     if not PUSH_TOKEN: print("🔴 警告：无 PUSH_TOKEN")
         
@@ -329,22 +335,19 @@ def main():
     last_row = df.iloc[-1]
     issue = int(last_row['Issue'])
     
-    # 计算
     r_s = analyze_red_single(df)
     r_g = analyze_red_groups(df)
     b_s = analyze_blue_single(df)
     b_g = analyze_blue_groups(df)
     
-    # 生成
     html_msg = build_compressed_report(issue, last_row, r_s, r_g, b_s, b_g)
     save_web_file(html_msg, issue)
     
-    # 推送
     if PUSH_TOKEN:
         print("📡 推送中...")
         requests.post('http://www.pushplus.plus/send', json={
             "token": PUSH_TOKEN, 
-            "title": f"📊 第 {issue} 期校准战报", 
+            "title": f"📊 第 {issue} 期复刻战报", 
             "content": html_msg, 
             "template": "html"
         })
